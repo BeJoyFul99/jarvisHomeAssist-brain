@@ -1,0 +1,39 @@
+# --- Binaries & Executables ---
+# This ignores the compiled "Brain" server so you don't upload a 20MB file
+main
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# --- Environment & Secrets ---
+# Crucial for when you add API keys for your AI or smart lights later
+.env
+*.env
+auth_secrets.json
+
+# --- Dependency Folders ---
+# Go manages these via go.mod; no need to upload the actual source code
+vendor/
+
+# --- Operating System Files ---
+# Specific to your MacBook Air (Retina 2020)
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# --- IDE Configs ---
+# Keeps your VS Code settings private
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Lab Specifics ---
+# If you store your AI models in a /models folder, ignore them (they are huge!)
+models/
+data/
+*.log
+
