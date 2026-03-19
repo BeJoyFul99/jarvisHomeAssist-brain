@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -33,7 +34,10 @@ func getLocalIP() string {
 }
 
 func main() {
-	os.Setenv("HOST_SYS", "/host/sys")
+	err := godotenv.Load()
+	if err != nil {
+		log.Println(err)
+	}
 	// Initialize the Gin router
 	r := gin.Default()
 
@@ -78,7 +82,7 @@ func main() {
 			log.Println(err)
 			return
 		}
-		
+
 		// 2. Get RAM usage stats
 		vMem, err := mem.VirtualMemory()
 		if err != nil {
@@ -111,7 +115,7 @@ func main() {
 					listeningPorts = append(listeningPorts, gin.H{
 						"port":   conn.Laddr.Port,
 						"ip":     conn.Laddr.IP,
-						"family": conn.Family, 
+						"family": conn.Family,
 					})
 				} else if conn.Status == "ESTABLISHED" {
 					activeConnCount++
@@ -176,18 +180,18 @@ func main() {
 				},
 			},
 			"cluster": gin.H{
-				"total_ram_gb":     19.7, // Mocked global tracking
+				"total_ram_gb":     19.7,  // Mocked global tracking
 				"total_storage_gb": 708.0, // Mocked global tracking
 				"active_nodes":     3,
 				"total_nodes":      3,
 				"ai_instances":     1,
 			},
 			"ai_engine": gin.H{
-				"status":         "Inferring",
-				"active_model":   "Mistral-7B-v0.3-Q4_K_M.gguf",
-				"tokens_per_sec": 0.0,
-				"context_used":   0,
-				"context_total":  8192,
+				"status":          "Inferring",
+				"active_model":    "Mistral-7B-v0.3-Q4_K_M.gguf",
+				"tokens_per_sec":  0.0,
+				"context_used":    0,
+				"context_total":   8192,
 				"compute_backend": "CPU",
 				"terminal_latest": ">_ llama.cpp prompt",
 				"available_models": []gin.H{
@@ -215,5 +219,5 @@ func main() {
 	})
 
 	// Start the server on port 8080
-	r.Run(":8080")
+	r.Run(":" + os.Getenv("PORT"))
 }

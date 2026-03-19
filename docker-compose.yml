@@ -1,15 +1,17 @@
 services:
   jarvis_brain:
     container_name: jarvis_brain
-    build: .
+    build:
+      context: .
+      args:
+        - PORT=${PORT}
+    image: joynerlee/jarvishomeassist_brain:latest
+    env_file: .env
     ports:
-      - "8080:8080"
+      - "${PORT}:${PORT}"
     restart: unless-stopped
     volumes:
       - /:/host:ro
-    environment:
-      - HOST_PROC=/host/proc
-      - HOST_SYS=/host/sys
     depends_on:
       - jarvis_memory
     networks:
@@ -17,10 +19,7 @@ services:
   jarvis_memory:
     image: postgres:18-alpine
     container_name: jarvis_memory
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=postgres
+    env_file: .env
     ports:
       - "5432:5432"
     volumes:

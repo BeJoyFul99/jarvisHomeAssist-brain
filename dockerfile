@@ -14,9 +14,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o brain .
 # Stage 2
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
+ARG PORT
+ENV PORT=${PORT}
 
 WORKDIR /root/
 COPY --from=builder /app/brain .
 
-EXPOSE 8080
+EXPOSE ${PORT}
 CMD ["./brain"]

@@ -7,7 +7,10 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.2
 )
 
-require github.com/shoenig/go-m1cpu v0.1.6 // indirect
+require (
+	github.com/joho/godotenv v1.5.1 // indirect
+	github.com/shoenig/go-m1cpu v0.1.6 // indirect
+)
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
