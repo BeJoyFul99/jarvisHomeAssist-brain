@@ -14,6 +14,11 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 	psnet "github.com/shirou/gopsutil/v4/net"
+
+	"jarvishomeassist-brain/internal/config"
+	"jarvishomeassist-brain/internal/database"
+	"jarvishomeassist-brain/internal/handlers"
+	"jarvishomeassist-brain/internal/middleware"
 )
 
 // getLocalIP returns the non loopback local IP of the host
@@ -38,10 +43,56 @@ func main() {
 	if err != nil {
 		log.Println(err)
 	}
+
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+
+	// Connect to PostgreSQL
+	db, err := database.Connect(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("[db] %v", err)
+	}
+	log.Println("[db] connected to PostgreSQL")
+
+	// Run migrations & seed
+	if err := database.Migrate(db); err != nil {
+		log.Fatalf("[db] %v", err)
+	}
+	handlers.SeedDefaultUsers(db)
+
 	// Initialize the Gin router
 	r := gin.Default()
 
-	// This is the API endpoint for your Lovable dashboard
+	// ── Auth routes (public) ────────────────────────────────
+	auth := &handlers.AuthHandler{DB: db, Cfg: cfg}
+	r.POST("/auth/login", auth.Login)
+	r.POST("/auth/pin-login", auth.PINLogin)
+	r.POST("/auth/reset-password", auth.ResetPassword)
+
+	// ── Protected route group (require valid JWT) ────────────
+	protected := r.Group("/api/v1")
+	protected.Use(middleware.JWTAuth(cfg.JWTSecret))
+
+	// ── Admin user management (JWT + administrator role) ─────
+	adminUsers := &handlers.AdminUserHandler{DB: db}
+	admin := protected.Group("/admin")
+	admin.Use(middleware.RequireRole("administrator"))
+
+	admin.GET("/users", adminUsers.ListUsers)
+	admin.POST("/users", adminUsers.CreateUser)
+	admin.PATCH("/users/:id", adminUsers.UpdateUser)
+	admin.DELETE("/users/:id", adminUsers.DeleteUser)
+	admin.POST("/users/:id/lock", adminUsers.LockUser)
+	admin.POST("/users/:id/revoke", adminUsers.RevokeTokens)
+	admin.POST("/users/:id/reset-password", adminUsers.RequestPasswordReset)
+	admin.GET("/permissions/schema", adminUsers.PermissionsSchema)
+
+	// ── System status (internal / server-to-server) ─────────
+	// This endpoint is called by the Next.js API proxy (server-side),
+	// not by browsers directly. Auth is enforced at the Next.js layer.
 	r.GET("/api/v1/status", func(c *gin.Context) {
 		// 1. Get CPU usage (sampled over 500ms)
 		overAllPercentage, err := cpu.Percent(500*time.Millisecond, false)
@@ -218,6 +269,6 @@ func main() {
 		})
 	})
 
-	// Start the server on port 8080
-	r.Run(":" + os.Getenv("PORT"))
+	// Start the server on port 5000
+	r.Run(":" + cfg.Port)
 }
