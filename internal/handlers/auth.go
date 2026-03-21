@@ -26,8 +26,9 @@ type loginRequest struct {
 }
 
 type pinLoginRequest struct {
-	PIN  string `json:"pin" binding:"required,len=6"`
-	Name string `json:"name" binding:"omitempty"`
+	PIN   string `json:"pin" binding:"required,len=6"`
+	Email string `json:"email" binding:"omitempty"`
+	Name  string `json:"name" binding:"omitempty"`
 }
 
 type loginResponse struct {

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"jarvishomeassist-brain/internal/models"
+	"jarvishomeassist-brain/internal/sse"
 	"log"
 	"math/big"
 	"net/http"
@@ -19,34 +21,42 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
-
-	"jarvishomeassist-brain/internal/models"
 )
 
 // AdminUserHandler groups admin user-management dependencies.
 type AdminUserHandler struct {
-	DB *gorm.DB
+	DB  *gorm.DB
+	Hub *sse.Hub
 }
 
 // ── helpers ────────────────────────────────────────────────
 
-func (h *AdminUserHandler) callerPermissions(c *gin.Context) models.Permissions {
+// requireResourcePerm loads the caller from DB and checks a resource permission.
+// Administrators always pass. Returns false (and aborts) if denied.
+func (h *AdminUserHandler) requireResourcePerm(c *gin.Context, perm string) bool {
+	// Administrators implicitly have every permission
+	role, _ := c.Get("user_role")
+	if role == "administrator" {
+		return true
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
 	email, _ := c.Get("user_email")
 	var caller models.User
 	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&caller).Error; err != nil {
-		return 0
-	}
-	return caller.Permissions
-}
-
-func (h *AdminUserHandler) requirePerm(c *gin.Context, required models.Permissions) bool {
-	if !h.callerPermissions(c).Has(required) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"error":   "insufficient_permissions",
 			"message": "You do not have permission to perform this action",
+		})
+		return false
+	}
+
+	if !caller.HasResourcePerm(perm) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "insufficient_permissions",
+			"message": "Missing permission: " + perm,
 		})
 		return false
 	}
@@ -111,11 +121,12 @@ type userListItem struct {
 	AccessCount   int64              `json:"access_count"`
 	LastLoginAt   *time.Time         `json:"last_login_at"`
 	CreatedAt     time.Time          `json:"created_at"`
+	DeletedAt     *time.Time         `json:"deleted_at"`
 }
 
 // ListUsers handles GET /api/v1/admin/users
 func (h *AdminUserHandler) ListUsers(c *gin.Context) {
-	if !h.requirePerm(c, models.PermViewUsers) {
+	if !h.requireResourcePerm(c, "user:view") {
 		return
 	}
 
@@ -123,7 +134,8 @@ func (h *AdminUserHandler) ListUsers(c *gin.Context) {
 	defer cancel()
 
 	var users []models.User
-	if err := h.DB.WithContext(ctx).Order("id asc").Find(&users).Error; err != nil {
+	// Unscoped so soft-deleted users are included in the list
+	if err := h.DB.WithContext(ctx).Unscoped().Order("deleted_at ASC NULLS FIRST, id ASC").Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to fetch users"})
 		return
 	}
@@ -133,6 +145,10 @@ func (h *AdminUserHandler) ListUsers(c *gin.Context) {
 		rp := json.RawMessage(u.ResourcePerms)
 		if rp == nil {
 			rp = json.RawMessage("[]")
+		}
+		var deletedAt *time.Time
+		if u.DeletedAt.Valid {
+			deletedAt = &u.DeletedAt.Time
 		}
 		list[i] = userListItem{
 			ID:            u.ID,
@@ -148,10 +164,12 @@ func (h *AdminUserHandler) ListUsers(c *gin.Context) {
 			AccessCount:   u.AccessCount,
 			LastLoginAt:   u.LastLoginAt,
 			CreatedAt:     u.CreatedAt,
+			DeletedAt:     deletedAt,
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"users": list})
+	callerEmail, _ := c.Get("user_email")
+	c.JSON(http.StatusOK, gin.H{"users": list, "caller_email": callerEmail})
 }
 
 // ── Create user ────────────────────────────────────────────
@@ -168,7 +186,7 @@ type createUserRequest struct {
 
 // CreateUser handles POST /api/v1/admin/users
 func (h *AdminUserHandler) CreateUser(c *gin.Context) {
-	if !h.requirePerm(c, models.PermManageUsers) {
+	if !h.requireResourcePerm(c, "user:create_guest") {
 		return
 	}
 
@@ -302,13 +320,17 @@ func (h *AdminUserHandler) CreateUser(c *gin.Context) {
 		resp["generated_password"] = generatedPassword
 	}
 	c.JSON(http.StatusCreated, resp)
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserCreated, user.ID, user.Email, string(user.Role))
+	}
 }
 
 // ── Regenerate Guest PIN ──────────────────────────────────
 
 // RegeneratePIN handles POST /api/v1/admin/users/:id/regenerate-pin
 func (h *AdminUserHandler) RegeneratePIN(c *gin.Context) {
-	if !h.requirePerm(c, models.PermManageUsers) {
+	if !h.requireResourcePerm(c, "user:regenerate_pin") {
 		return
 	}
 
@@ -359,6 +381,10 @@ func (h *AdminUserHandler) RegeneratePIN(c *gin.Context) {
 		"message":   "PIN regenerated successfully",
 		"guest_pin": pin,
 	})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserPinRegenerated, user.ID, user.Email, string(user.Role))
+	}
 }
 
 // ── Update user ────────────────────────────────────────────
@@ -370,9 +396,9 @@ type updateUserRequest struct {
 }
 
 // UpdateUser handles PATCH /api/v1/admin/users/:id
-// Admins can change role, resource permissions, and permission expiry.
+// Users with user:edit_perms can change role, resource permissions, and permission expiry.
 func (h *AdminUserHandler) UpdateUser(c *gin.Context) {
-	if !h.requirePerm(c, models.PermManageUsers) {
+	if !h.requireResourcePerm(c, "user:edit_perms") {
 		return
 	}
 
@@ -443,13 +469,17 @@ func (h *AdminUserHandler) UpdateUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "User updated"})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserUpdated, user.ID, user.Email, string(user.Role))
+	}
 }
 
 // ── Password Reset Request ────────────────────────────────
 
 // RequestPasswordReset handles POST /api/v1/admin/users/:id/reset-password
 func (h *AdminUserHandler) RequestPasswordReset(c *gin.Context) {
-	if !h.requirePerm(c, models.PermManageUsers) {
+	if !h.requireResourcePerm(c, "user:edit_perms") {
 		return
 	}
 
@@ -529,7 +559,7 @@ func (h *AdminUserHandler) RequestPasswordReset(c *gin.Context) {
 // ── Delete user ────────────────────────────────────────────
 
 func (h *AdminUserHandler) DeleteUser(c *gin.Context) {
-	if !h.requirePerm(c, models.PermManageUsers) {
+	if !h.requireResourcePerm(c, "user:delete_guest") {
 		return
 	}
 
@@ -564,6 +594,66 @@ func (h *AdminUserHandler) DeleteUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted"})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserDeleted, user.ID, user.Email, string(user.Role))
+	}
+}
+
+// ── Restore soft-deleted user ─────────────────────────────
+
+func (h *AdminUserHandler) RestoreUser(c *gin.Context) {
+	if !h.requireResourcePerm(c, "user:delete_guest") {
+		return
+	}
+
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_id", "message": "Invalid user ID"})
+		return
+	}
+
+	ctx, cancel := dbCtx(c)
+	defer cancel()
+
+	// Find the soft-deleted user
+	var user models.User
+	if err := h.DB.WithContext(ctx).Unscoped().Where("id = ? AND deleted_at IS NOT NULL", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Deleted user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to fetch user"})
+		return
+	}
+
+	// Clear deleted_at to restore
+	if err := h.DB.WithContext(ctx).Unscoped().Model(&user).Update("deleted_at", nil).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to restore user"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "User restored", "user_id": user.ID})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserRestored, user.ID, user.Email, string(user.Role))
+	}
+}
+
+// ── Hard-delete cleanup ──────────────────────────────────
+
+// PurgeDeletedUsers permanently removes users that have been soft-deleted
+// for more than 30 days. Intended to be called by a periodic cron/ticker.
+func PurgeDeletedUsers(db *gorm.DB) {
+	cutoff := time.Now().AddDate(0, 0, -30)
+	result := db.Unscoped().Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).Delete(&models.User{})
+	if result.Error != nil {
+		log.Printf("[cron] purge deleted users error: %v", result.Error)
+		return
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("[cron] purged %d users deleted >30 days ago", result.RowsAffected)
+	}
 }
 
 // ── Lock / Unlock ──────────────────────────────────────────
@@ -573,7 +663,7 @@ type lockRequest struct {
 }
 
 func (h *AdminUserHandler) LockUser(c *gin.Context) {
-	if !h.requirePerm(c, models.PermLockUsers) {
+	if !h.requireResourcePerm(c, "user:lock") {
 		return
 	}
 
@@ -592,23 +682,34 @@ func (h *AdminUserHandler) LockUser(c *gin.Context) {
 	ctx, cancel := dbCtx(c)
 	defer cancel()
 
-	result := h.DB.WithContext(ctx).Model(&models.User{}).Where("id = ?", id).Update("is_locked", req.IsLocked)
-	if result.RowsAffected == 0 {
+	var user models.User
+	if err := h.DB.WithContext(ctx).First(&user, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "User not found"})
 		return
 	}
 
+	if err := h.DB.WithContext(ctx).Model(&user).Update("is_locked", req.IsLocked).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to update user"})
+		return
+	}
+
 	status := "unlocked"
+	eventType := sse.EventUserUnlocked
 	if req.IsLocked {
 		status = "locked"
+		eventType = sse.EventUserLocked
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "User " + status})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(eventType, user.ID, user.Email, string(user.Role))
+	}
 }
 
 // ── Revoke Tokens ──────────────────────────────────────────
 
 func (h *AdminUserHandler) RevokeTokens(c *gin.Context) {
-	if !h.requirePerm(c, models.PermRevokeTokens) {
+	if !h.requireResourcePerm(c, "user:lock") {
 		return
 	}
 
@@ -621,12 +722,20 @@ func (h *AdminUserHandler) RevokeTokens(c *gin.Context) {
 	ctx, cancel := dbCtx(c)
 	defer cancel()
 
-	result := h.DB.WithContext(ctx).Model(&models.User{}).Where("id = ?", id).
-		Update("token_rev", gorm.Expr("token_rev + 1"))
-	if result.RowsAffected == 0 {
+	var user models.User
+	if err := h.DB.WithContext(ctx).First(&user, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "User not found"})
 		return
 	}
 
+	if err := h.DB.WithContext(ctx).Model(&user).Update("token_rev", gorm.Expr("token_rev + 1")).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to revoke tokens"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "All tokens revoked for this user"})
+
+	if h.Hub != nil {
+		h.Hub.BroadcastUserEvent(sse.EventUserTokensRevoked, user.ID, user.Email, string(user.Role))
+	}
 }
