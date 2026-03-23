@@ -9,14 +9,16 @@ import (
 
 // Config holds all application configuration read from the environment.
 type Config struct {
-	Port           string
-	DatabaseURL    string
-	JWTSecret      string
-	JWTExpiry      time.Duration
-	CFWorkerURL    string // Cloudflare Worker AI endpoint (optional)
-	CFWorkerSecret string // Shared secret for CF Worker auth (optional)
-	CFAccountID    string // Cloudflare Account ID (for Analytics Engine queries)
-	CFAPIToken     string // Cloudflare API Token with Analytics read permissions
+	Port              string
+	DatabaseURL       string
+	JWTSecret         string
+	JWTExpiry         time.Duration
+	CFWorkerURL       string // Cloudflare Worker AI endpoint (optional)
+	CFWorkerSecret    string // Shared secret for CF Worker auth (optional)
+	CFAccountID       string // Cloudflare Account ID (for Analytics Engine queries)
+	CFAPIToken        string // Cloudflare API Token with Analytics read permissions
+	UploadBaseDir     string // Base directory for file uploads (default: ./uploads)
+	UploadChatSubdir  string // Subdirectory for chat uploads (default: chat)
 }
 
 // Load reads configuration from environment variables.
@@ -44,14 +46,16 @@ func Load() (*Config, error) {
 	expiryHours, _ := strconv.Atoi(envOrDefault("JWT_EXPIRY_HOURS", "24"))
 
 	return &Config{
-		Port:           envOrDefault("BRAIN_PORT", "5000"),
-		DatabaseURL:    dbURL,
-		JWTSecret:      jwtSecret,
-		JWTExpiry:      time.Duration(expiryHours) * time.Hour,
-		CFWorkerURL:    os.Getenv("CF_WORKER_URL"),
-		CFWorkerSecret: os.Getenv("CF_WORKER_SECRET"),
-		CFAccountID:    os.Getenv("CF_ACCOUNT_ID"),
-		CFAPIToken:     os.Getenv("CF_API_TOKEN"),
+		Port:             envOrDefault("BRAIN_PORT", "5000"),
+		DatabaseURL:      dbURL,
+		JWTSecret:        jwtSecret,
+		JWTExpiry:        time.Duration(expiryHours) * time.Hour,
+		CFWorkerURL:      os.Getenv("CF_WORKER_URL"),
+		CFWorkerSecret:   os.Getenv("CF_WORKER_SECRET"),
+		CFAccountID:      os.Getenv("CF_ACCOUNT_ID"),
+		CFAPIToken:       os.Getenv("CF_API_TOKEN"),
+		UploadBaseDir:    envOrDefault("UPLOAD_BASE_DIR", "./uploads"),
+		UploadChatSubdir: envOrDefault("UPLOAD_CHAT_SUBDIR", "chat"),
 	}, nil
 }
 

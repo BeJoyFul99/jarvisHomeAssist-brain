@@ -71,7 +71,7 @@ func main() {
 	r := gin.Default()
 
 	// ── Static file serving (uploads) ────────────────────────
-	r.Static("/uploads", "./uploads")
+	r.Static("/uploads", cfg.UploadBaseDir)
 
 	// ── Auth routes (public) ────────────────────────────────
 	auth := &handlers.AuthHandler{DB: db, Cfg: cfg}
@@ -172,6 +172,8 @@ func main() {
 	protected.GET("/chat/rooms", chat.ListRooms)
 	protected.POST("/chat/rooms", chat.CreateRoom)
 	protected.GET("/chat/users", chat.ListUsers)
+	// Issue short-lived tickets for WebSocket handshake
+	protected.POST("/chat/authorize", chat.Authorize)
 	protected.GET("/chat/rooms/:id/messages", chat.GetMessages)
 	protected.POST("/chat/rooms/:id/messages", chat.SendMessage)
 	protected.POST("/chat/rooms/:id/seen", chat.MarkSeen)

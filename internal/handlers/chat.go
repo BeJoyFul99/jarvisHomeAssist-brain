@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -58,12 +57,52 @@ type ChatHandler struct {
 	// Semaphore to limit concurrent AI requests
 	aiSem chan struct{}
 	once  sync.Once
+	// Short-lived single-use tickets for websocket handshake
+	tickets   map[string]ticketEntry
+	ticketsMu sync.Mutex
+}
+
+type ticketEntry struct {
+	Email     string
+	ExpiresAt time.Time
 }
 
 func (h *ChatHandler) initSem() {
 	h.once.Do(func() {
 		h.aiSem = make(chan struct{}, 3)
 	})
+}
+
+// IssueTicket creates a short-lived single-use ticket for the given email.
+func (h *ChatHandler) IssueTicket(email string, ttl time.Duration) string {
+	ticket := uuid.New().String()
+	h.ticketsMu.Lock()
+	if h.tickets == nil {
+		h.tickets = make(map[string]ticketEntry)
+	}
+	h.tickets[ticket] = ticketEntry{Email: email, ExpiresAt: time.Now().Add(ttl)}
+	h.ticketsMu.Unlock()
+	return ticket
+}
+
+// validateAndConsumeTicket checks a ticket and consumes it if valid.
+func (h *ChatHandler) validateAndConsumeTicket(ticket string) (string, bool) {
+	h.ticketsMu.Lock()
+	defer h.ticketsMu.Unlock()
+	if h.tickets == nil {
+		return "", false
+	}
+	entry, ok := h.tickets[ticket]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		delete(h.tickets, ticket)
+		return "", false
+	}
+	// single-use: delete now
+	delete(h.tickets, ticket)
+	return entry.Email, true
 }
 
 // SeedDefaultChatRooms creates the family group chat room if it doesn't exist.
@@ -366,7 +405,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 				ext = ".jpg"
 			}
 			filename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
-			uploadDir := "./uploads/chat"
+			uploadDir := filepath.Join(h.Cfg.UploadBaseDir, h.Cfg.UploadChatSubdir)
 			os.MkdirAll(uploadDir, 0755)
 			savePath := filepath.Join(uploadDir, filename)
 
@@ -593,39 +632,48 @@ func (h *ChatHandler) ListUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// Authorize issues a short-lived single-use ticket for websocket handshake.
+// POST /api/v1/chat/authorize
+func (h *ChatHandler) Authorize(c *gin.Context) {
+	user, err := h.currentUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
+		return
+	}
+
+	// Guests cannot get tickets
+	if user.Role == models.RoleGuest {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "message": "guests cannot access chat"})
+		return
+	}
+
+	// Issue single-use ticket (30s TTL)
+	ticket := h.IssueTicket(user.Email, 30*time.Second)
+
+	c.JSON(http.StatusOK, gin.H{"ticket": ticket, "expires_in_seconds": 30})
+}
+
 // ── WebSocket Endpoint ─────────────────────────────────────────
 
 // WebSocket upgrades the HTTP connection to WebSocket for real-time chat.
 // GET /api/v1/chat/ws?token=<jwt>
 // Auth is handled via query param since browsers can't send headers on WS upgrade.
 func (h *ChatHandler) WebSocket(c *gin.Context) {
-	tokenStr := c.Query("token")
-	if tokenStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing_token"})
-		return
-	}
-
-	// Validate the JWT
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return []byte(h.Cfg.JWTSecret), nil
-	})
-	if err != nil || !token.Valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
-		return
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_claims"})
-		return
-	}
-	email, _ := claims["email"].(string)
-
-	// Look up the user
+	// Support short-lived single-use tickets for WebSocket handshake.
+	// Clients should POST /api/v1/chat/authorize with Authorization: Bearer <JWT>
+	// to receive a ticket, then open WS with ?ticket=<uuid>.
+	// Only support short-lived single-use tickets for WebSocket handshake.
 	var user models.User
+	ticket := c.Query("ticket")
+	if ticket == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing_ticket"})
+		return
+	}
+	email, ok := h.validateAndConsumeTicket(ticket)
+	if !ok || email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_ticket"})
+		return
+	}
 	if err := h.DB.Where("email = ?", email).First(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
 		return
@@ -908,13 +956,26 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 // readImageAsBase64 reads a local upload path and returns a data URI for the vision model.
 func readImageAsBase64(mediaURL string) string {
 	// mediaURL is like "/uploads/chat/abc.jpg" — resolve to local path
-	localPath := "." + mediaURL // "./uploads/chat/abc.jpg"
-	data, err := os.ReadFile(localPath)
+	// Try both relative and common paths for robustness
+	possiblePaths := []string{
+		"." + mediaURL, // "./uploads/chat/abc.jpg"
+		mediaURL,       // absolute or configured path
+	}
+
+	var data []byte
+	var err error
+	for _, path := range possiblePaths {
+		data, err = os.ReadFile(path)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
-		log.Printf("[chat-ai] failed to read image %s: %v", localPath, err)
+		log.Printf("[chat-ai] failed to read image %s: %v", mediaURL, err)
 		return ""
 	}
-	ext := strings.ToLower(filepath.Ext(localPath))
+	ext := strings.ToLower(filepath.Ext(mediaURL))
 	mime := "image/jpeg"
 	switch ext {
 	case ".png":
