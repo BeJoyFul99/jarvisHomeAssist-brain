@@ -4,11 +4,11 @@ services:
     build:
       context: .
       args:
-        - PORT=${PORT}
+        - BRAIN_PORT=${BRAIN_PORT}
     image: joynerlee/jarvishomeassist_brain:latest
     env_file: .env
     ports:
-      - "${PORT}:${PORT}"
+      - "${BRAIN_PORT}:${BRAIN_PORT}"
     restart: unless-stopped
     volumes:
       - /:/host:ro

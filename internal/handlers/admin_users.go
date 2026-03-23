@@ -67,6 +67,43 @@ func dbCtx(c *gin.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.Request.Context(), 5*time.Second)
 }
 
+// callerInfo extracts the acting user's email and display name from the JWT context.
+func callerInfo(c *gin.Context) (email string, name string) {
+	if v, ok := c.Get("user_email"); ok {
+		email, _ = v.(string)
+	}
+	if v, ok := c.Get("user_name"); ok {
+		name, _ = v.(string)
+	}
+	return
+}
+
+// audit persists an audit log entry. Runs in a goroutine to avoid blocking the request.
+func (h *AdminUserHandler) audit(c *gin.Context, action string, target models.User, details string) {
+	actorEmail, actorName := callerInfo(c)
+	// Look up actor ID from DB (best-effort)
+	var actorID uint
+	var actor models.User
+	if err := h.DB.Where("email = ?", actorEmail).Select("id").First(&actor).Error; err == nil {
+		actorID = actor.ID
+	}
+	entry := models.AuditLog{
+		Action:      action,
+		ActorID:     actorID,
+		ActorEmail:  actorEmail,
+		ActorName:   actorName,
+		TargetID:    target.ID,
+		TargetEmail: target.Email,
+		TargetName:  target.DisplayName,
+		Details:     details,
+	}
+	go func() {
+		if err := h.DB.Create(&entry).Error; err != nil {
+			log.Printf("[audit] failed to write log: %v", err)
+		}
+	}()
+}
+
 // validateResourcePerms checks that every permission string is valid.
 func validateResourcePerms(perms []string) []string {
 	var invalid []string
@@ -120,6 +157,8 @@ type userListItem struct {
 	HasPIN        bool               `json:"has_pin"`
 	AccessCount   int64              `json:"access_count"`
 	LastLoginAt   *time.Time         `json:"last_login_at"`
+	CreatedByID   uint               `json:"created_by_id"`
+	CreatedByName string             `json:"created_by_name"`
 	CreatedAt     time.Time          `json:"created_at"`
 	DeletedAt     *time.Time         `json:"deleted_at"`
 }
@@ -163,6 +202,8 @@ func (h *AdminUserHandler) ListUsers(c *gin.Context) {
 			HasPIN:        u.GuestPIN != "",
 			AccessCount:   u.AccessCount,
 			LastLoginAt:   u.LastLoginAt,
+			CreatedByID:   u.CreatedByID,
+			CreatedByName: u.CreatedByName,
 			CreatedAt:     u.CreatedAt,
 			DeletedAt:     deletedAt,
 		}
@@ -249,6 +290,14 @@ func (h *AdminUserHandler) CreateUser(c *gin.Context) {
 		permExpiry = &t
 	}
 
+	// Resolve caller for created_by tracking
+	callerEmail, callerName := callerInfo(c)
+	var callerID uint
+	var callerUser models.User
+	if err := h.DB.Where("email = ?", callerEmail).Select("id").First(&callerUser).Error; err == nil {
+		callerID = callerUser.ID
+	}
+
 	user := models.User{
 		Email:         req.Email,
 		DisplayName:   req.DisplayName,
@@ -256,6 +305,8 @@ func (h *AdminUserHandler) CreateUser(c *gin.Context) {
 		Role:          role,
 		ResourcePerms: resourcePerms,
 		PermExpiresAt: permExpiry,
+		CreatedByID:   callerID,
+		CreatedByName: callerName,
 	}
 
 	if user.Role == models.RoleAdmin {
@@ -308,6 +359,8 @@ func (h *AdminUserHandler) CreateUser(c *gin.Context) {
 			IsLocked:      user.IsLocked,
 			HasPIN:        user.GuestPIN != "",
 			AccessCount:   0,
+			CreatedByID:   user.CreatedByID,
+			CreatedByName: user.CreatedByName,
 			CreatedAt:     user.CreatedAt,
 		},
 	}
@@ -324,6 +377,8 @@ func (h *AdminUserHandler) CreateUser(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserCreated, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditUserCreated, user, fmt.Sprintf("role=%s", user.Role))
+ 
 }
 
 // ── Regenerate Guest PIN ──────────────────────────────────
@@ -385,6 +440,7 @@ func (h *AdminUserHandler) RegeneratePIN(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserPinRegenerated, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditPINRegenerated, user, "")
 }
 
 // ── Update user ────────────────────────────────────────────
@@ -473,6 +529,7 @@ func (h *AdminUserHandler) UpdateUser(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserUpdated, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditUserUpdated, user, fmt.Sprintf("role=%s", user.Role))
 }
 
 // ── Password Reset Request ────────────────────────────────
@@ -554,6 +611,7 @@ func (h *AdminUserHandler) RequestPasswordReset(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Password reset email sent to " + user.Email,
 	})
+	h.audit(c, models.AuditPasswordReset, user, "")
 }
 
 // ── Delete user ────────────────────────────────────────────
@@ -598,6 +656,7 @@ func (h *AdminUserHandler) DeleteUser(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserDeleted, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditUserDeleted, user, "")
 }
 
 // ── Restore soft-deleted user ─────────────────────────────
@@ -638,6 +697,7 @@ func (h *AdminUserHandler) RestoreUser(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserRestored, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditUserRestored, user, "")
 }
 
 // ── Hard-delete cleanup ──────────────────────────────────
@@ -695,15 +755,18 @@ func (h *AdminUserHandler) LockUser(c *gin.Context) {
 
 	status := "unlocked"
 	eventType := sse.EventUserUnlocked
+	auditAction := models.AuditUserUnlocked
 	if req.IsLocked {
 		status = "locked"
 		eventType = sse.EventUserLocked
+		auditAction = models.AuditUserLocked
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "User " + status})
 
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(eventType, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, auditAction, user, "")
 }
 
 // ── Revoke Tokens ──────────────────────────────────────────
@@ -738,4 +801,37 @@ func (h *AdminUserHandler) RevokeTokens(c *gin.Context) {
 	if h.Hub != nil {
 		h.Hub.BroadcastUserEvent(sse.EventUserTokensRevoked, user.ID, user.Email, string(user.Role))
 	}
+	h.audit(c, models.AuditTokensRevoked, user, "")
+}
+
+// ── Audit Logs ──────────────────────────────────────────────
+
+// AuditLogs handles GET /api/v1/admin/audit-logs
+// Optional query params: ?target_id=N to filter by target user, ?limit=50
+func (h *AdminUserHandler) AuditLogs(c *gin.Context) {
+	if !h.requireResourcePerm(c, "user:view") {
+		return
+	}
+
+	ctx, cancel := dbCtx(c)
+	defer cancel()
+
+	limit := 100
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+
+	q := h.DB.WithContext(ctx).Order("created_at DESC").Limit(limit)
+
+	if targetID := c.Query("target_id"); targetID != "" {
+		q = q.Where("target_id = ?", targetID)
+	}
+
+	var logs []models.AuditLog
+	if err := q.Find(&logs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to fetch audit logs"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"logs": logs})
 }

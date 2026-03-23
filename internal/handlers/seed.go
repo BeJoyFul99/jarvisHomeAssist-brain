@@ -35,36 +35,12 @@ func SeedDefaultUsers(db *gorm.DB) {
 			Permissions:   models.AdminAll,
 			ResourcePerms: models.DefaultPermsJSON(models.RoleAdmin),
 		},
-		{
-			Email:         "admin@homelab.local",
-			DisplayName:   "Jarvis Admin",
-			Password:      "admin1234",
-			Role:          models.RoleAdmin,
-			Permissions:   models.AdminAll,
-			ResourcePerms: models.DefaultPermsJSON(models.RoleAdmin),
-		},
-		{
-			Email:         "family@homelab.local",
-			DisplayName:   "Family User",
-			Password:      "family1234",
-			Role:          models.RoleFamilyMember,
-			Permissions:   0,
-			ResourcePerms: models.DefaultPermsJSON(models.RoleFamilyMember),
-		},
-		{
-			Email:         "guest@homelab.local",
-			DisplayName:   "Guest User",
-			Password:      "guest1234",
-			Role:          models.RoleGuest,
-			Permissions:   0,
-			ResourcePerms: models.DefaultPermsJSON(models.RoleGuest),
-		},
 	}
 
 	for _, s := range defaults {
-		var existing models.User
-		result := db.WithContext(ctx).Where("email = ?", s.Email).First(&existing)
-		if result.Error == nil {
+		var count int64
+		db.WithContext(ctx).Model(&models.User{}).Where("email = ?", s.Email).Count(&count)
+		if count > 0 {
 			continue // already exists
 		}
 

@@ -35,7 +35,7 @@ func Connect(dsn string) (*gorm.DB, error) {
 
 // Migrate runs AutoMigrate for all application models.
 func Migrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(&models.User{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.WifiNetwork{}, &models.SmartDevice{}, &models.EnergyReading{}, &models.EnergyRate{}, &models.EnergyBudget{}, &models.Setting{}, &models.ChatRoom{}, &models.ChatMessage{}, &models.ChatReadReceipt{}); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 	log.Println("[db] migrations complete")

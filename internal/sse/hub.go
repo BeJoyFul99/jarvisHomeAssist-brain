@@ -9,14 +9,15 @@ import (
 
 // Event types broadcast to connected clients.
 const (
-	EventUserCreated       = "user:created"
-	EventUserUpdated       = "user:updated"
-	EventUserDeleted       = "user:deleted"
-	EventUserRestored      = "user:restored"
-	EventUserLocked        = "user:locked"
-	EventUserUnlocked      = "user:unlocked"
-	EventUserTokensRevoked = "user:tokens_revoked"
+	EventUserCreated        = "user:created"
+	EventUserUpdated        = "user:updated"
+	EventUserDeleted        = "user:deleted"
+	EventUserRestored       = "user:restored"
+	EventUserLocked         = "user:locked"
+	EventUserUnlocked       = "user:unlocked"
+	EventUserTokensRevoked  = "user:tokens_revoked"
 	EventUserPinRegenerated = "user:pin_regenerated"
+	EventStatusUpdate       = "status:update"
 )
 
 // Event is the payload sent over SSE.

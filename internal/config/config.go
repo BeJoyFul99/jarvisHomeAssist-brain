@@ -9,24 +9,31 @@ import (
 
 // Config holds all application configuration read from the environment.
 type Config struct {
-	Port        string
-	DatabaseURL string
-	JWTSecret   string
-	JWTExpiry   time.Duration
+	Port           string
+	DatabaseURL    string
+	JWTSecret      string
+	JWTExpiry      time.Duration
+	CFWorkerURL    string // Cloudflare Worker AI endpoint (optional)
+	CFWorkerSecret string // Shared secret for CF Worker auth (optional)
+	CFAccountID    string // Cloudflare Account ID (for Analytics Engine queries)
+	CFAPIToken     string // Cloudflare API Token with Analytics read permissions
 }
 
 // Load reads configuration from environment variables.
 // Required variables will cause a fatal error if missing.
 func Load() (*Config, error) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		// Build from individual POSTGRES_* vars for backwards compat with docker-compose
+	// Fall back to building from individual POSTGRES_* vars (docker-compose, .env, etc.)
+	dbURL := ""
+	pgHost := os.Getenv("POSTGRES_HOST")
+	if pgHost != "" {
 		user := envOrDefault("POSTGRES_USER", "postgres")
 		pass := envOrDefault("POSTGRES_PASSWORD", "postgres")
 		db := envOrDefault("POSTGRES_DB", "postgres")
-		host := envOrDefault("POSTGRES_HOST", "jarvis_memory")
 		port := envOrDefault("POSTGRES_PORT", "5432")
-		dbURL = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, pass, db)
+		dbURL = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", pgHost, port, user, pass, db)
+	}
+	if dbURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL or POSTGRES_HOST environment variable is required")
 	}
 
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -37,10 +44,14 @@ func Load() (*Config, error) {
 	expiryHours, _ := strconv.Atoi(envOrDefault("JWT_EXPIRY_HOURS", "24"))
 
 	return &Config{
-		Port:        envOrDefault("PORT", "5000"),
-		DatabaseURL: dbURL,
-		JWTSecret:   jwtSecret,
-		JWTExpiry:   time.Duration(expiryHours) * time.Hour,
+		Port:           envOrDefault("BRAIN_PORT", "5000"),
+		DatabaseURL:    dbURL,
+		JWTSecret:      jwtSecret,
+		JWTExpiry:      time.Duration(expiryHours) * time.Hour,
+		CFWorkerURL:    os.Getenv("CF_WORKER_URL"),
+		CFWorkerSecret: os.Getenv("CF_WORKER_SECRET"),
+		CFAccountID:    os.Getenv("CF_ACCOUNT_ID"),
+		CFAPIToken:     os.Getenv("CF_API_TOKEN"),
 	}, nil
 }
 

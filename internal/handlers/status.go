@@ -15,10 +15,37 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 	psnet "github.com/shirou/gopsutil/v4/net"
+
+	"jarvishomeassist-brain/internal/sse"
 )
 
 // StatusHandler serves system status as JSON or SSE stream.
-type StatusHandler struct{}
+type StatusHandler struct {
+	Hub *sse.Hub
+}
+
+// StartStatusTicker runs a background goroutine that pushes status updates
+// through the SSE hub every 3 seconds.
+func (h *StatusHandler) StartStatusTicker() {
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if h.Hub.Count() == 0 {
+				continue // no clients, skip expensive collection
+			}
+			data, err := collectStatus()
+			if err != nil {
+				log.Printf("[status-ticker] collect error: %v", err)
+				continue
+			}
+			h.Hub.Broadcast(sse.Event{
+				Type: sse.EventStatusUpdate,
+				Data: data,
+			})
+		}
+	}()
+}
 
 // getLocalIP returns the non-loopback local IP of the host.
 func getLocalIP() string {
@@ -38,20 +65,23 @@ func getLocalIP() string {
 
 // collectStatus gathers system metrics and returns them as a gin.H map.
 func collectStatus() (gin.H, error) {
-	// 1. CPU usage (sampled over 500ms)
-	overAllPercentage, err := cpu.Percent(500*time.Millisecond, false)
-	if err != nil {
-		return nil, fmt.Errorf("cpu overall: %w", err)
-	}
+	// 1. CPU usage (single sample over 500ms — per-core; derive overall from average)
 	perCorePercentage, err := cpu.Percent(500*time.Millisecond, true)
 	if err != nil {
 		return nil, fmt.Errorf("cpu per-core: %w", err)
 	}
 
 	cpuUsage := make([]gin.H, len(perCorePercentage))
+	var cpuSum float64
 	for i, pct := range perCorePercentage {
 		cpuUsage[i] = gin.H{"core": i, "usage": pct}
+		cpuSum += pct
 	}
+	overallCPU := 0.0
+	if len(perCorePercentage) > 0 {
+		overallCPU = cpuSum / float64(len(perCorePercentage))
+	}
+	overAllPercentage := []float64{overallCPU}
 
 	cpuInfo, err := cpu.Info()
 	cpuModelName := "Unknown"
