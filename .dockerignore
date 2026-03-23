@@ -1,0 +1,17 @@
+# Local compiled binaries
+bin/
+obj/
+*main
+
+# Database and persistent data
+data/
+*.db
+*.sqlite
+
+# Environment and Git
+.env*
+.git
+.gitignore
+
+# Go specific
+vendor/
