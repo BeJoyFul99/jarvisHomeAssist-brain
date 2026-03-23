@@ -33,7 +33,6 @@ Thumbs.db
 
 # --- Lab Specifics ---
 # If you store your AI models in a /models folder, ignore them (they are huge!)
-models/
 data/
 *.log
 
