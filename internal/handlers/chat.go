@@ -43,7 +43,11 @@ In group chats, you only respond when mentioned with @jarvis. In direct conversa
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true }, // allow all origins in dev
+	CheckOrigin: func(r *http.Request) bool {
+		// Behind Cloudflare Tunnel the Origin header is the public domain.
+		// Allow all origins — auth is enforced via JWT token in query param.
+		return true
+	},
 }
 
 // ChatHandler manages chat rooms, messages, and AI integration.
@@ -633,7 +637,11 @@ func (h *ChatHandler) WebSocket(c *gin.Context) {
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+	// Set response headers that help reverse proxies (cloudflared, nginx) keep the connection alive
+	upgradeHeaders := http.Header{}
+	upgradeHeaders.Set("X-Accel-Buffering", "no") // disable proxy buffering
+
+	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, upgradeHeaders)
 	if err != nil {
 		log.Printf("[chat-ws] upgrade error: %v", err)
 		return
@@ -668,7 +676,7 @@ func (h *ChatHandler) WebSocket(c *gin.Context) {
 	h.WSHub.Register <- wsClient
 
 	go wsClient.WritePump()
-	go wsClient.ReadPump(h.handleWSMessage)
+	wsClient.ReadPump(h.handleWSMessage) // blocks until connection closes — required for reverse proxies like cloudflared
 }
 
 // handleWSMessage processes incoming WebSocket messages from clients.

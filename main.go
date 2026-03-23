@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -195,7 +196,17 @@ func main() {
 		}
 	}()
 
-	// Start the server
+	// Start the server with explicit timeouts that won't kill WebSocket connections.
+	// ReadHeaderTimeout guards the initial handshake; no ReadTimeout/WriteTimeout
+	// so long-lived WebSocket and SSE connections are not prematurely closed.
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	appLogger.Info("system", "Server listening on port "+cfg.Port)
-	r.Run(":" + cfg.Port)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[server] %v", err)
+	}
 }
