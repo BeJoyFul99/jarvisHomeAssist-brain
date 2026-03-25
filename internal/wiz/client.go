@@ -3,9 +3,10 @@ package wiz
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"time"
+
+	"jarvishomeassist-brain/internal/logger"
 )
 
 const (
@@ -141,16 +142,16 @@ func Ping(ip string) bool {
 
 // Discover broadcasts a registration message on the local network to find WiZ bulbs.
 // Returns a list of responding IPs.
-func Discover(localIP string, timeout time.Duration) []string {
+func Discover(localIP string, timeout time.Duration, log *logger.Logger) []string {
 	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("255.255.255.255:%d", WizPort))
 	if err != nil {
-		log.Printf("[wiz] resolve broadcast addr: %v", err)
+		log.Error("wiz", fmt.Sprintf("resolve broadcast addr: %v", err))
 		return nil
 	}
 
 	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
-		log.Printf("[wiz] dial broadcast: %v", err)
+		log.Error("wiz", fmt.Sprintf("dial broadcast: %v", err))
 		return nil
 	}
 	defer conn.Close()
@@ -182,7 +183,7 @@ func Discover(localIP string, timeout time.Duration) []string {
 			ip := remoteAddr.IP.String()
 			if !found[ip] {
 				found[ip] = true
-				log.Printf("[wiz] discovered bulb at %s", ip)
+				log.Info("wiz", fmt.Sprintf("discovered bulb at %s", ip))
 			}
 		}
 	}

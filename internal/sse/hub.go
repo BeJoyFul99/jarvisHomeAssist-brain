@@ -3,8 +3,9 @@ package sse
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
+
+	"jarvishomeassist-brain/internal/logger"
 )
 
 // Event types broadcast to connected clients.
@@ -43,12 +44,14 @@ type client struct {
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[*client]struct{}
+	log     *logger.Logger
 }
 
 // NewHub creates a new SSE hub.
-func NewHub() *Hub {
+func NewHub(l *logger.Logger) *Hub {
 	return &Hub{
 		clients: make(map[*client]struct{}),
+		log:     l,
 	}
 }
 
@@ -62,14 +65,14 @@ func (h *Hub) Subscribe(email string) (ch <-chan []byte, unsubscribe func()) {
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 
-	log.Printf("[sse] client connected: %s (total: %d)", email, h.Count())
+	h.log.Info("sse", fmt.Sprintf("client connected: %s (total: %d)", email, h.Count()))
 
 	return c.ch, func() {
 		h.mu.Lock()
 		delete(h.clients, c)
 		close(c.ch)
 		h.mu.Unlock()
-		log.Printf("[sse] client disconnected: %s (total: %d)", email, h.Count())
+		h.log.Info("sse", fmt.Sprintf("client disconnected: %s (total: %d)", email, h.Count()))
 	}
 }
 
@@ -84,7 +87,7 @@ func (h *Hub) Count() int {
 func (h *Hub) Broadcast(event Event) {
 	data, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("[sse] marshal error: %v", err)
+		h.log.Error("sse", fmt.Sprintf("marshal error: %v", err))
 		return
 	}
 	msg := []byte(fmt.Sprintf("data: %s\n\n", data))
@@ -97,7 +100,7 @@ func (h *Hub) Broadcast(event Event) {
 		case c.ch <- msg:
 		default:
 			// client buffer full, skip
-			log.Printf("[sse] dropping message for slow client: %s", c.email)
+			h.log.Warn("sse", fmt.Sprintf("dropping message for slow client: %s", c.email))
 		}
 	}
 }

@@ -19,6 +19,7 @@ const (
 	RoleAdmin        Role = "administrator"
 	RoleFamilyMember Role = "family_member"
 	RoleGuest        Role = "guest"
+	RoleAssistant    Role = "assistant" // For the AI assistant user
 )
 
 // Permissions is a bitmask for admin-level operations (user management, etc.).
@@ -79,6 +80,11 @@ func DefaultPermsForRole(role Role) []string {
 			"media:view", "media:manage",
 			"camera:view",
 		}
+	case RoleAssistant:
+		return []string{
+			"smart_device:view", "smart_device:control",
+			"media:view",
+		}
 	case RoleGuest:
 		return []string{"ui:view", "smart_device:view", "media:view"}
 	default:
@@ -123,10 +129,10 @@ type User struct {
 	FCMToken      string         `gorm:"size:512" json:"-"`
 	LastLoginAt   *time.Time     `json:"last_login_at"`
 	// Password reset token and expiry used for password reset flows.
-	PasswordResetToken  string         `gorm:"size:512" json:"-"`
-	PasswordResetExpiry *time.Time     `json:"-"`
+	PasswordResetToken  string     `gorm:"size:512" json:"-"`
+	PasswordResetExpiry *time.Time `json:"-"`
 	// Per-user UI preferences (theme, notifications, etc.)
-	Preferences   datatypes.JSON `gorm:"type:jsonb;default:'{}'" json:"preferences"`
+	Preferences datatypes.JSON `gorm:"type:jsonb;default:'{}'" json:"preferences"`
 	// Tracks which admin created this user.
 	CreatedByID   uint           `gorm:"default:0" json:"created_by_id"`
 	CreatedByName string         `gorm:"size:255" json:"created_by_name"`

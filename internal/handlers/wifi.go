@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/models"
 	"jarvishomeassist-brain/internal/sse"
 )
@@ -254,7 +255,7 @@ func cond(ok bool, a, b string) string {
 }
 
 // SeedDefaultWifiNetworks creates default WiFi networks if none exist.
-func SeedDefaultWifiNetworks(db *gorm.DB) {
+func SeedDefaultWifiNetworks(db *gorm.DB, log *logger.Logger) {
 	var count int64
 	db.Model(&models.WifiNetwork{}).Count(&count)
 	if count > 0 {
@@ -284,9 +285,9 @@ func SeedDefaultWifiNetworks(db *gorm.DB) {
 
 	for _, n := range defaults {
 		if err := db.Create(&n).Error; err != nil {
-			log.Printf("[seed] wifi %s: %v", n.SSID, err)
+			log.Error("seed", fmt.Sprintf("wifi %s: %v", n.SSID, err))
 		} else {
-			log.Printf("[seed] wifi %s created", n.SSID)
+			log.Info("seed", fmt.Sprintf("wifi %s created", n.SSID))
 		}
 	}
 }

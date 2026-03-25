@@ -2,11 +2,13 @@ package ws
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"jarvishomeassist-brain/internal/logger"
 )
 
 const (
@@ -41,14 +43,16 @@ type Hub struct {
 	clients    map[*Client]struct{}
 	Register   chan *Client
 	Unregister chan *Client
+	log        *logger.Logger
 }
 
 // NewHub creates a new WebSocket hub and starts the run loop.
-func NewHub() *Hub {
+func NewHub(l *logger.Logger) *Hub {
 	h := &Hub{
 		clients:    make(map[*Client]struct{}),
 		Register:   make(chan *Client),
 		Unregister: make(chan *Client),
+		log:        l,
 	}
 	go h.run()
 	return h
@@ -61,7 +65,7 @@ func (h *Hub) run() {
 			h.mu.Lock()
 			h.clients[client] = struct{}{}
 			h.mu.Unlock()
-			log.Printf("[ws] client connected: %s (total: %d)", client.Email, h.Count())
+			h.log.Info("ws", fmt.Sprintf("client connected: %s (total: %d)", client.Email, h.Count()))
 
 		case client := <-h.Unregister:
 			h.mu.Lock()
@@ -70,7 +74,7 @@ func (h *Hub) run() {
 				close(client.Send)
 			}
 			h.mu.Unlock()
-			log.Printf("[ws] client disconnected: %s (total: %d)", client.Email, h.Count())
+			h.log.Info("ws", fmt.Sprintf("client disconnected: %s (total: %d)", client.Email, h.Count()))
 		}
 	}
 }
@@ -86,7 +90,7 @@ func (h *Hub) Count() int {
 func (h *Hub) BroadcastToRoom(roomID uint, msg Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("[ws] marshal error: %v", err)
+		h.log.Error("ws", fmt.Sprintf("marshal error: %v", err))
 		return
 	}
 
@@ -101,7 +105,7 @@ func (h *Hub) BroadcastToRoom(roomID uint, msg Message) {
 			select {
 			case c.Send <- data:
 			default:
-				log.Printf("[ws] dropping message for slow client: %s", c.Email)
+				h.log.Warn("ws", fmt.Sprintf("dropping message for slow client: %s", c.Email))
 			}
 		}
 	}
@@ -111,7 +115,7 @@ func (h *Hub) BroadcastToRoom(roomID uint, msg Message) {
 func (h *Hub) BroadcastToAll(msg Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("[ws] marshal error: %v", err)
+		h.log.Error("ws", fmt.Sprintf("marshal error: %v", err))
 		return
 	}
 
@@ -122,7 +126,7 @@ func (h *Hub) BroadcastToAll(msg Message) {
 		select {
 		case c.Send <- data:
 		default:
-			log.Printf("[ws] dropping message for slow client: %s", c.Email)
+			h.log.Warn("ws", fmt.Sprintf("dropping message for slow client: %s", c.Email))
 		}
 	}
 }
@@ -131,7 +135,7 @@ func (h *Hub) BroadcastToAll(msg Message) {
 func (h *Hub) SendToUser(userID uint, msg Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("[ws] marshal error: %v", err)
+		h.log.Error("ws", fmt.Sprintf("marshal error: %v", err))
 		return
 	}
 
@@ -174,14 +178,14 @@ func (c *Client) ReadPump(onMessage func(client *Client, msg Message)) {
 		_, raw, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("[ws] read error from %s: %v", c.Email, err)
+				c.Hub.log.Error("ws", fmt.Sprintf("read error from %s: %v", c.Email, err))
 			}
 			break
 		}
 
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			log.Printf("[ws] invalid message from %s: %v", c.Email, err)
+			c.Hub.log.Warn("ws", fmt.Sprintf("invalid message from %s: %v", c.Email, err))
 			continue
 		}
 

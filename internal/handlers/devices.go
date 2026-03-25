@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/models"
 	"jarvishomeassist-brain/internal/sse"
 	"jarvishomeassist-brain/internal/wiz"
@@ -19,6 +20,7 @@ import (
 type DeviceHandler struct {
 	DB  *gorm.DB
 	Hub *sse.Hub
+	Log *logger.Logger
 }
 
 // ── List ──────────────────────────────────────────────────
@@ -326,7 +328,7 @@ func (h *DeviceHandler) Control(c *gin.Context) {
 	}
 
 	if wizErr != nil {
-		log.Printf("[wiz] control %s (device %d @ %s): %v", body.Action, device.ID, device.IP, wizErr)
+		h.Log.Error("wiz", fmt.Sprintf("control %s (device %d @ %s): %v", body.Action, device.ID, device.IP, wizErr))
 		c.JSON(http.StatusBadGateway, gin.H{"error": "device unreachable", "detail": wizErr.Error()})
 		return
 	}
@@ -416,7 +418,7 @@ func (h *DeviceHandler) Discover(c *gin.Context) {
 		return
 	}
 
-	ips := wiz.Discover(localIP, 3*time.Second)
+	ips := wiz.Discover(localIP, 3*time.Second, h.Log)
 
 	// Check which IPs are already registered
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
@@ -480,7 +482,7 @@ func (h *DeviceHandler) Scenes(c *gin.Context) {
 func (h *DeviceHandler) probeWizDevice(deviceID uint, ip string) {
 	resp, err := wiz.GetSystemConfig(ip)
 	if err != nil {
-		log.Printf("[wiz] probe %s failed: %v", ip, err)
+		h.Log.Error("wiz", fmt.Sprintf("probe %s failed: %v", ip, err))
 		return
 	}
 
@@ -526,11 +528,11 @@ func (h *DeviceHandler) probeWizDevice(deviceID uint, ip string) {
 		}
 	}
 
-	log.Printf("[wiz] probed device %d @ %s successfully", deviceID, ip)
+	h.Log.Info("wiz", fmt.Sprintf("probed device %d @ %s successfully", deviceID, ip))
 }
 
 // SeedDefaultDevices creates a sample WiZ bulb entry if no devices exist.
-func SeedDefaultDevices(db *gorm.DB) {
+func SeedDefaultDevices(db *gorm.DB, log *logger.Logger) {
 	var count int64
 	db.Model(&models.SmartDevice{}).Count(&count)
 	if count > 0 {
@@ -554,9 +556,9 @@ func SeedDefaultDevices(db *gorm.DB) {
 
 	for _, d := range defaults {
 		if err := db.Create(&d).Error; err != nil {
-			log.Printf("[seed] device %s: %v", d.Name, err)
+			log.Error("seed", fmt.Sprintf("device %s: %v", d.Name, err))
 		} else {
-			log.Printf("[seed] device %s created (ip: %s)", d.Name, d.IP)
+			log.Info("seed", fmt.Sprintf("device %s created (ip: %s)", d.Name, d.IP))
 		}
 	}
 }

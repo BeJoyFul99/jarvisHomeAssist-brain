@@ -2,12 +2,13 @@ package database
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
+
+	applogger "jarvishomeassist-brain/internal/logger"
 
 	"jarvishomeassist-brain/internal/models"
 )
@@ -15,7 +16,7 @@ import (
 // Connect opens a PostgreSQL connection via GORM with pooling defaults.
 func Connect(dsn string) (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gorm open: %w", err)
@@ -34,10 +35,10 @@ func Connect(dsn string) (*gorm.DB, error) {
 }
 
 // Migrate runs AutoMigrate for all application models.
-func Migrate(db *gorm.DB) error {
+func Migrate(db *gorm.DB, log *applogger.Logger) error {
 	if err := db.AutoMigrate(&models.User{}, &models.AuditLog{}, &models.WifiNetwork{}, &models.SmartDevice{}, &models.EnergyReading{}, &models.EnergyRate{}, &models.EnergyBudget{}, &models.Setting{}, &models.ChatRoom{}, &models.ChatMessage{}, &models.ChatReadReceipt{}); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
-	log.Println("[db] migrations complete")
+	log.Info("db", "migrations complete")
 	return nil
 }

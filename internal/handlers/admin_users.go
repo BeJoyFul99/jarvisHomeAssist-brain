@@ -8,9 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/models"
 	"jarvishomeassist-brain/internal/sse"
-	"log"
 	"math/big"
 	"net/http"
 	"net/smtp"
@@ -27,6 +27,7 @@ import (
 type AdminUserHandler struct {
 	DB  *gorm.DB
 	Hub *sse.Hub
+	Log *logger.Logger
 }
 
 // ── helpers ────────────────────────────────────────────────
@@ -99,7 +100,7 @@ func (h *AdminUserHandler) audit(c *gin.Context, action string, target models.Us
 	}
 	go func() {
 		if err := h.DB.Create(&entry).Error; err != nil {
-			log.Printf("[audit] failed to write log: %v", err)
+			h.Log.Error("audit", fmt.Sprintf("failed to write log: %v", err))
 		}
 	}()
 }
@@ -601,11 +602,11 @@ func (h *AdminUserHandler) RequestPasswordReset(c *gin.Context) {
 			"\r\n" + body)
 		auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
 		if err := smtp.SendMail(smtpHost+":"+smtpPort, auth, from, to, msg); err != nil {
-			log.Printf("[warn] failed to send password reset email to %s: %v", user.Email, err)
+			h.Log.Warn("admin", fmt.Sprintf("failed to send password reset email to %s: %v", user.Email, err))
 		}
 	} else {
 		// Not configured — log the reset link so operators/devs can use it in development
-		log.Printf("[info] password reset link for %s: %s", user.Email, resetURL)
+		h.Log.Info("admin", fmt.Sprintf("password reset link for %s: %s", user.Email, resetURL))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -704,15 +705,15 @@ func (h *AdminUserHandler) RestoreUser(c *gin.Context) {
 
 // PurgeDeletedUsers permanently removes users that have been soft-deleted
 // for more than 30 days. Intended to be called by a periodic cron/ticker.
-func PurgeDeletedUsers(db *gorm.DB) {
+func PurgeDeletedUsers(db *gorm.DB, log *logger.Logger) {
 	cutoff := time.Now().AddDate(0, 0, -30)
 	result := db.Unscoped().Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).Delete(&models.User{})
 	if result.Error != nil {
-		log.Printf("[cron] purge deleted users error: %v", result.Error)
+		log.Error("cron", fmt.Sprintf("purge deleted users error: %v", result.Error))
 		return
 	}
 	if result.RowsAffected > 0 {
-		log.Printf("[cron] purged %d users deleted >30 days ago", result.RowsAffected)
+		log.Info("cron", fmt.Sprintf("purged %d users deleted >30 days ago", result.RowsAffected))
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,11 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"jarvishomeassist-brain/internal/config"
+	"jarvishomeassist-brain/internal/logger"
 )
 
 // AIUsageHandler serves AI usage analytics from Cloudflare Analytics Engine.
 type AIUsageHandler struct {
 	Cfg *config.Config
+	Log *logger.Logger
 }
 
 // analyticsResponse matches the Cloudflare Analytics Engine SQL API response.
@@ -53,7 +54,7 @@ func (h *AIUsageHandler) queryAnalyticsEngine(query string) (*analyticsResponse,
 
 	body, _ := io.ReadAll(resp.Body)
 
-	log.Printf("[ai-usage] CF Analytics response (%d): %s", resp.StatusCode, string(body))
+	h.Log.Debug("ai-usage", fmt.Sprintf("CF Analytics response (%d): %s", resp.StatusCode, string(body)))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("analytics API error (%d): %s", resp.StatusCode, string(body))
@@ -168,7 +169,7 @@ func (h *AIUsageHandler) Today(c *gin.Context) {
 			countIf(blob3 = 'error') as error_count,
 			countIf(blob6 = 'vision') as vision_calls
 		FROM jarvis_home_assist_analytics
-		WHERE timestamp > NOW() - INTERVAL '1' DAY
+		WHERE toDate(timestamp) = toDate(NOW())
 	`
 
 	result, err := h.queryAnalyticsEngine(query)

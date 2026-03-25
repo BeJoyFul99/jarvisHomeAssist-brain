@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,12 +15,14 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	psnet "github.com/shirou/gopsutil/v4/net"
 
+	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/sse"
 )
 
 // StatusHandler serves system status as JSON or SSE stream.
 type StatusHandler struct {
 	Hub *sse.Hub
+	Log *logger.Logger
 }
 
 // StartStatusTicker runs a background goroutine that pushes status updates
@@ -36,7 +37,7 @@ func (h *StatusHandler) StartStatusTicker() {
 			}
 			data, err := collectStatus()
 			if err != nil {
-				log.Printf("[status-ticker] collect error: %v", err)
+				h.Log.Error("status", fmt.Sprintf("ticker collect error: %v", err))
 				continue
 			}
 			h.Hub.Broadcast(sse.Event{
@@ -95,7 +96,7 @@ func collectStatus() (gin.H, error) {
 	}
 	sensorsTemps, err := host.SensorsTemperatures()
 	if err != nil {
-		log.Printf("[status] sensors: %v", err)
+		// sensors may not be available on all platforms — silently ignore
 		sensorsTemps = nil
 	}
 
@@ -235,7 +236,7 @@ func collectStatus() (gin.H, error) {
 func (h *StatusHandler) Get(c *gin.Context) {
 	data, err := collectStatus()
 	if err != nil {
-		log.Printf("[status] collect error: %v", err)
+		h.Log.Error("status", fmt.Sprintf("collect error: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to collect status"})
 		return
 	}
@@ -269,7 +270,7 @@ func (h *StatusHandler) Stream(c *gin.Context) {
 		case <-ticker.C:
 			data, err := collectStatus()
 			if err != nil {
-				log.Printf("[status-sse] collect error: %v", err)
+				h.Log.Error("status", fmt.Sprintf("SSE collect error: %v", err))
 				continue
 			}
 			raw, err := json.Marshal(data)

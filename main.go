@@ -57,15 +57,16 @@ func main() {
 	appLogger.Info("db", "Connected to PostgreSQL")
 
 	// Run migrations & seed
-	if err := database.Migrate(db); err != nil {
+	if err := database.Migrate(db, appLogger); err != nil {
 		log.Fatalf("[db] %v", err)
 	}
+
 	appLogger.Info("db", "Migrations complete")
-	handlers.SeedDefaultUsers(db)
-	handlers.SeedDefaultWifiNetworks(db)
-	handlers.SeedDefaultDevices(db)
+	handlers.SeedDefaultUsers(db, appLogger)
+	handlers.SeedDefaultWifiNetworks(db, appLogger)
+	handlers.SeedDefaultDevices(db, appLogger)
 	handlers.SeedDefaultSettings(db)
-	handlers.SeedDefaultChatRooms(db)
+	handlers.SeedDefaultChatRooms(db, appLogger)
 
 	// Initialize the Gin router
 	r := gin.Default()
@@ -82,9 +83,10 @@ func main() {
 	// ── Protected route group (require valid JWT) ────────────
 	protected := r.Group("/api/v1")
 	protected.Use(middleware.JWTAuth(cfg.JWTSecret))
+	protected.Use(middleware.RateLimiter()) // Apply rate limiting to all protected routes
 
 	// ── SSE hub for real-time events ─────────────────────────
-	eventHub := sse.NewHub()
+	eventHub := sse.NewHub(appLogger)
 
 	// ── SSE stream (requires valid JWT) ──────────────────────
 	sseHandler := &handlers.SSEHandler{Hub: eventHub}
@@ -93,7 +95,7 @@ func main() {
 
 	// ── User management (JWT + per-handler resource perm checks) ─────
 	// Administrators and family_members with user:* perms can access these.
-	adminUsers := &handlers.AdminUserHandler{DB: db, Hub: eventHub}
+	adminUsers := &handlers.AdminUserHandler{DB: db, Hub: eventHub, Log: appLogger}
 	admin := protected.Group("/admin")
 	admin.Use(middleware.RequireRole("administrator", "family_member"))
 
@@ -119,7 +121,7 @@ func main() {
 	admin.DELETE("/wifi/:id", wifi.Delete)
 
 	// ── Smart device management ─────────────────────────────
-	devices := &handlers.DeviceHandler{DB: db, Hub: eventHub}
+	devices := &handlers.DeviceHandler{DB: db, Hub: eventHub, Log: appLogger}
 	protected.GET("/devices", devices.List)                 // all users can list
 	protected.GET("/devices/:id", devices.Get)              // single device
 	protected.GET("/devices/:id/state", devices.State)      // poll live state from bulb
@@ -159,7 +161,7 @@ func main() {
 	admin.GET("/logs/stream", logsHandler.Stream)
 
 	// ── AI usage analytics (admin only) ─────────────────────
-	aiUsage := &handlers.AIUsageHandler{Cfg: cfg}
+	aiUsage := &handlers.AIUsageHandler{Cfg: cfg, Log: appLogger}
 	admin.GET("/ai-usage/summary", aiUsage.Summary)
 	admin.GET("/ai-usage/by-model", aiUsage.ByModel)
 	admin.GET("/ai-usage/errors", aiUsage.Errors)
@@ -167,8 +169,8 @@ func main() {
 	admin.GET("/ai-usage/config", aiUsage.Config)
 
 	// ── Chat (real-time messaging + AI) ─────────────────────
-	wsHub := ws.NewHub()
-	chat := &handlers.ChatHandler{DB: db, WSHub: wsHub, Cfg: cfg}
+	wsHub := ws.NewHub(appLogger)
+	chat := &handlers.ChatHandler{DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger}
 	protected.GET("/chat/rooms", chat.ListRooms)
 	protected.POST("/chat/rooms", chat.CreateRoom)
 	protected.GET("/chat/users", chat.ListUsers)
@@ -182,7 +184,7 @@ func main() {
 	r.GET("/api/v1/chat/ws", chat.WebSocket)
 
 	// ── System status ───────────────────────────────────────
-	statusHandler := &handlers.StatusHandler{Hub: eventHub}
+	statusHandler := &handlers.StatusHandler{Hub: eventHub, Log: appLogger}
 	r.GET("/api/v1/status", statusHandler.Get)            // single JSON snapshot
 	protected.GET("/status/stream", statusHandler.Stream) // SSE stream (every 3s)
 	statusHandler.StartStatusTicker()                     // push status through SSE hub every 3s
@@ -192,9 +194,9 @@ func main() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		// Run once at startup, then every 24h
-		handlers.PurgeDeletedUsers(db)
+		handlers.PurgeDeletedUsers(db, appLogger)
 		for range ticker.C {
-			handlers.PurgeDeletedUsers(db)
+			handlers.PurgeDeletedUsers(db, appLogger)
 		}
 	}()
 

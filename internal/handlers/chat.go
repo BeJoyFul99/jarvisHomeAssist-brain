@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,9 +22,12 @@ import (
 	"gorm.io/gorm"
 
 	"jarvishomeassist-brain/internal/config"
+	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/models"
 	"jarvishomeassist-brain/internal/ws"
 )
+
+const AIUserID uint = 999
 
 // Jarvis system prompt — defines the AI persona.
 const jarvisSystemPrompt = `You are Jarvis, the AI assistant for a smart home system called Jarvis Home Assist. You help the family with home automation, answer questions, and provide useful information.
@@ -54,6 +56,7 @@ type ChatHandler struct {
 	DB    *gorm.DB
 	WSHub *ws.Hub
 	Cfg   *config.Config
+	Log   *logger.Logger
 	// Semaphore to limit concurrent AI requests
 	aiSem chan struct{}
 	once  sync.Once
@@ -106,14 +109,35 @@ func (h *ChatHandler) validateAndConsumeTicket(ticket string) (string, bool) {
 }
 
 // SeedDefaultChatRooms creates the family group chat room if it doesn't exist.
-func SeedDefaultChatRooms(db *gorm.DB) {
+func SeedDefaultChatRooms(db *gorm.DB, log *logger.Logger) {
 	var room models.ChatRoom
-	if db.Where("type = ?", "group").First(&room).Error != nil {
-		db.Create(&models.ChatRoom{
-			Name: "Family Chat",
-			Type: "group",
-		})
-		log.Println("[seed] created Family Chat room")
+	// 1. Check if the Family Chat already exists
+	if err := db.Where("type = ?", "group").First(&room).Error; err != nil {
+
+		// 2. Find your AI User (assuming RoleAssistant is "assistant")
+		var aiUser models.User
+		var participants []models.User
+		if err := db.Where("role = ?", models.RoleAssistant).First(&aiUser).Error; err == nil {
+			participants = append(participants, aiUser)
+		}
+		roles := []models.Role{models.RoleAssistant, models.RoleFamilyMember, models.RoleAdmin}
+		if err := db.Where("role IN ?", roles).Find(&participants).Error; err != nil {
+			log.Error("seed", fmt.Sprintf("failed to fetch users: %v", err))
+		}
+
+		// 3. Create the room with the AI as a participant
+		newRoom := models.ChatRoom{
+			Name:         "Family Chat",
+			Type:         "group",
+			OwnerID:      &aiUser.ID, // Group chats usually have no owner
+			Participants: participants,
+		}
+
+		if err := db.Create(&newRoom).Error; err != nil {
+			log.Error("seed", fmt.Sprintf("failed to create Family Chat: %v", err))
+		} else {
+			log.Info("seed", "created Family Chat room with AI participant")
+		}
 	}
 }
 
@@ -137,26 +161,32 @@ func (h *ChatHandler) currentUser(c *gin.Context) (*models.User, error) {
 // ensureDirectAIRoom returns the user's direct_ai room, creating it if needed.
 func (h *ChatHandler) ensureDirectAIRoom(userID uint, userName string) (*models.ChatRoom, error) {
 	var room models.ChatRoom
+
 	err := h.DB.Where("type = ? AND owner_id = ?", "direct_ai", userID).First(&room).Error
 	if err == nil {
 		return &room, nil
 	}
-	room = models.ChatRoom{
-		Name:    "Jarvis AI",
-		Type:    "direct_ai",
-		OwnerID: &userID,
+	var aiUser models.User
+	if err := h.DB.Where("role = ?", models.RoleAssistant).First(&aiUser).Error; err == nil {
+		room = models.ChatRoom{
+			Name:    aiUser.DisplayName,
+			Type:    "direct_ai",
+			OwnerID: &userID,
+		}
 	}
 	if err := h.DB.Create(&room).Error; err != nil {
 		return nil, err
 	}
-	log.Printf("[chat] created direct AI room for %s (user %d)", userName, userID)
+	h.Log.Info("chat", fmt.Sprintf("created direct AI room for %s (user %d)", userName, userID))
 	return &room, nil
 }
 
-// canAccessRoom checks if the user can access a given room.
 func (h *ChatHandler) canAccessRoom(room *models.ChatRoom, userID uint) bool {
-	if room.Type == "group" {
-		return true // all authenticated (non-guest) users can access group rooms
+	if room.OwnerID != nil && *room.OwnerID == AIUserID && room.Type == "group" {
+		return true
+	}
+	if room.Type == "group" || room.Type == "DM" {
+		return true
 	}
 	return room.OwnerID != nil && *room.OwnerID == userID
 }
@@ -179,7 +209,7 @@ func (h *ChatHandler) ListRooms(c *gin.Context) {
 	}
 
 	// Ensure the user has a direct AI room
-	directRoom, err := h.ensureDirectAIRoom(user.ID, user.DisplayName)
+	_, err = h.ensureDirectAIRoom(user.ID, user.DisplayName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create AI room"})
 		return
@@ -190,10 +220,17 @@ func (h *ChatHandler) ListRooms(c *gin.Context) {
 
 	// Get the group room(s)
 	var rooms []models.ChatRoom
-	h.DB.WithContext(ctx).Where("type = ?", "group").Find(&rooms)
-
+	// Unified query for all room types the user is part of
+	err = h.DB.WithContext(ctx).
+		// Join the junction table (standard GORM name for many-to-many)
+		Joins("LEFT JOIN chat_room_participants ON chat_room_participants.chat_room_id = chat_rooms.id").
+		// 1. User is in the participant list (for DMs and Private Groups)
+		// 2. User is the owner (for Direct AI rooms)
+		Where("chat_room_participants.user_id = ? OR chat_rooms.owner_id = ?", user.ID, user.ID).
+		Distinct().
+		Preload("Participants").
+		Find(&rooms).Error
 	// Add the direct AI room
-	rooms = append(rooms, *directRoom)
 
 	// Compute unread counts
 	type roomResponse struct {
@@ -233,7 +270,7 @@ func (h *ChatHandler) ListRooms(c *gin.Context) {
 // createRoomRequest is the JSON body for creating a new chat room.
 type createRoomRequest struct {
 	Name         string `json:"name" binding:"required"`
-	Type         string `json:"type" binding:"required"` // "group" or "direct_ai"
+	Type         string `json:"type" binding:"required"` // "group" or "direct_ai" or "DM"
 	Participants []uint `json:"participants"`            // optional participant IDs for group rooms
 }
 
@@ -241,6 +278,7 @@ type createRoomRequest struct {
 // POST /api/v1/chat/rooms
 func (h *ChatHandler) CreateRoom(c *gin.Context) {
 	user, err := h.currentUser(c)
+	room_types := []string{"group", "direct_ai", "DM"}
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
 		return
@@ -259,25 +297,27 @@ func (h *ChatHandler) CreateRoom(c *gin.Context) {
 	}
 
 	// Validate room type
-	if req.Type != "group" && req.Type != "direct_ai" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_room_type", "message": "type must be 'group' or 'direct_ai'"})
+	if !contains(room_types, req.Type) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_room_type", "message": "type must be one of 'group', 'direct_ai', or 'DM'"})
 		return
 	}
 
-	// Only the creator can have a direct_ai room; group rooms have no owner
-	var ownerID *uint
-	if req.Type == "direct_ai" {
-		ownerID = &user.ID
-	}
-
+	// The creator of the room is always assigned as the owner.
+	ownerID := &user.ID
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
+	var participants []models.User
+	if req.Type == "group" || req.Type == "DM" && len(req.Participants) > 0 {
+		h.DB.WithContext(ctx).Find(&participants, req.Participants)
+	}
+
 	// Create the room
 	room := models.ChatRoom{
-		Name:    req.Name,
-		Type:    req.Type,
-		OwnerID: ownerID,
+		Name:         req.Name,
+		Type:         req.Type,
+		OwnerID:      ownerID,
+		Participants: participants,
 	}
 
 	if err := h.DB.WithContext(ctx).Create(&room).Error; err != nil {
@@ -285,12 +325,21 @@ func (h *ChatHandler) CreateRoom(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[chat] created %s room '%s' (id: %d) by user %s", req.Type, req.Name, room.ID, user.DisplayName)
+	h.Log.Info("chat", fmt.Sprintf("created %s room '%s' (id: %d) by user %s", req.Type, req.Name, room.ID, user.DisplayName))
 
 	// For group rooms, the participants array is noted but not stored (all authenticated users can access group rooms)
 	// If in the future you want to use a ChatMembership table or participant restrictions, add that logic here.
 
 	c.JSON(http.StatusOK, room)
+}
+
+func contains(room_types []string, s string) bool {
+	for _, v := range room_types {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // GetMessages returns messages for a room with pagination.
@@ -322,23 +371,21 @@ func (h *ChatHandler) GetMessages(c *gin.Context) {
 		return
 	}
 
-	limit := 50
-	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 200 {
-		limit = l
-	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	before, _ := strconv.ParseUint(c.Query("before"), 10, 64)
+	var messages []models.ChatMessage
+	query := h.DB.Preload("Sender").Preload("ReplyTo").Preload("ReplyTo.Sender").
+		Where("room_id = ?", roomID).
+		Order("id DESC").
+		Limit(limit)
 
-	query := h.DB.WithContext(ctx).Where("room_id = ?", roomID)
-
-	if before, err := strconv.ParseUint(c.Query("before"), 10, 64); err == nil {
+	if before > 0 {
 		query = query.Where("id < ?", before)
 	}
 
-	var messages []models.ChatMessage
-	query.Order("id DESC").Limit(limit).Preload("ReplyTo").Find(&messages)
-
-	// Reverse to chronological order
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
+	if err := query.Find(&messages).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch messages"})
+		return
 	}
 
 	c.JSON(http.StatusOK, messages)
@@ -461,15 +508,15 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 	// Save the message
 	msg := models.ChatMessage{
-		RoomID:     uint(roomID),
-		SenderID:   &user.ID,
-		SenderName: user.DisplayName,
-		Role:       "user",
-		Status:     "sent",
-		Content:    content,
-		Type:       msgType,
-		MediaURL:   mediaURL,
-		ReplyToID:  replyToID,
+		RoomID:    uint(roomID),
+		SenderID:  &user.ID,
+		Sender:    user,
+		Role:      "user",
+		Status:    "sent",
+		Content:   content,
+		Type:      msgType,
+		MediaURL:  mediaURL,
+		ReplyToID: replyToID,
 	}
 
 	if err := h.DB.WithContext(ctx).Create(&msg).Error; err != nil {
@@ -502,9 +549,10 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 	// Determine if AI should respond
 	shouldAIRespond := false
-	if room.Type == "direct_ai" {
+	switch room.Type {
+	case "direct_ai":
 		shouldAIRespond = true
-	} else if room.Type == "group" {
+	case "group":
 		lower := strings.ToLower(content)
 		if strings.Contains(lower, "@jarvis") || strings.Contains(lower, "@ai") {
 			shouldAIRespond = true
@@ -691,7 +739,7 @@ func (h *ChatHandler) WebSocket(c *gin.Context) {
 
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, upgradeHeaders)
 	if err != nil {
-		log.Printf("[chat-ws] upgrade error: %v", err)
+		h.Log.Error("chat-ws", fmt.Sprintf("upgrade error: %v", err))
 		return
 	}
 
@@ -806,20 +854,32 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 		if role == "system" {
 			continue // skip system messages in history
 		}
+		// Get sender name from the linked User object
+		senderName := "Unknown"
+		if m.Sender != nil {
+			senderName = m.Sender.DisplayName
+		}
+
 		content := m.Content
 		if role == "user" {
 			// Prefix with sender name for context
-			content = m.SenderName + ": " + content
-			// Include reply context so the AI knows what message is being replied to
+			content = senderName + ": " + content
+
+			// Handle reply context
 			if m.ReplyTo != nil {
-				replyPrefix := "[replying to " + m.ReplyTo.SenderName + ": \"" + m.ReplyTo.Content + "\"] "
-				content = m.SenderName + ": " + replyPrefix + m.Content
+				replyToName := "Unknown"
+				if m.ReplyTo.Sender != nil {
+					replyToName = m.ReplyTo.Sender.DisplayName
+				}
+
+				replyPrefix := "[replying to " + replyToName + ": \"" + m.ReplyTo.Content + "\"] "
+				content = senderName + ": " + replyPrefix + m.Content
 			}
 		}
 
 		// If this is an image message with a local file, include as base64 for the vision model
 		if m.Type == "image" && m.MediaURL != nil && role == "user" {
-			imgData := readImageAsBase64(*m.MediaURL)
+			imgData := h.readImageAsBase64(*m.MediaURL)
 			if imgData != "" {
 				parts := []contentPart{
 					{Type: "text", Text: content},
@@ -858,7 +918,7 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[chat-ai] request error: %v", err)
+		h.Log.Error("chat-ai", fmt.Sprintf("request error: %v", err))
 		h.saveAIError(roomID, "Sorry, I'm having trouble connecting right now.")
 		return
 	}
@@ -866,7 +926,7 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("[chat-ai] non-200 response (%d): %s", resp.StatusCode, string(body))
+		h.Log.Error("chat-ai", fmt.Sprintf("non-200 response (%d): %s", resp.StatusCode, string(body)))
 		h.saveAIError(roomID, "Sorry, I couldn't process that request right now.")
 		return
 	}
@@ -914,13 +974,15 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 		responseText = "I'm sorry, I wasn't able to generate a response."
 	}
 
+	// Define a constant for your AI User ID (match what's in your DB)
+	id := AIUserID
 	aiMsg2 := models.ChatMessage{
-		RoomID:     roomID,
-		SenderName: "Jarvis",
-		Role:       "assistant",
-		Status:     "sent",
-		Content:    responseText,
-		Type:       "text",
+		RoomID:   roomID,
+		SenderID: &id, // Link to the AI User record
+		Role:     "assistant",
+		Status:   "sent",
+		Content:  responseText,
+		Type:     "text",
 	}
 	h.DB.Create(&aiMsg2)
 
@@ -954,7 +1016,7 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 
 // saveAIError saves an error message from the AI and broadcasts it.
 // readImageAsBase64 reads a local upload path and returns a data URI for the vision model.
-func readImageAsBase64(mediaURL string) string {
+func (h *ChatHandler) readImageAsBase64(mediaURL string) string {
 	// mediaURL is like "/uploads/chat/abc.jpg" — resolve to local path
 	// Try both relative and common paths for robustness
 	possiblePaths := []string{
@@ -972,7 +1034,7 @@ func readImageAsBase64(mediaURL string) string {
 	}
 
 	if err != nil {
-		log.Printf("[chat-ai] failed to read image %s: %v", mediaURL, err)
+		h.Log.Warn("chat-ai", fmt.Sprintf("failed to read image %s: %v", mediaURL, err))
 		return ""
 	}
 	ext := strings.ToLower(filepath.Ext(mediaURL))
@@ -989,13 +1051,14 @@ func readImageAsBase64(mediaURL string) string {
 }
 
 func (h *ChatHandler) saveAIError(roomID uint, errorMsg string) {
+	id := AIUserID
 	msg := models.ChatMessage{
-		RoomID:     roomID,
-		SenderName: "Jarvis",
-		Role:       "assistant",
-		Status:     "sent",
-		Content:    errorMsg,
-		Type:       "text",
+		RoomID:   roomID,
+		SenderID: &id,
+		Role:     "assistant",
+		Status:   "sent",
+		Content:  errorMsg,
+		Type:     "text",
 	}
 	h.DB.Create(&msg)
 
