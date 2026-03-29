@@ -15,6 +15,7 @@ import (
 	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/middleware"
 	"jarvishomeassist-brain/internal/sse"
+	"jarvishomeassist-brain/internal/workers"
 	"jarvishomeassist-brain/internal/ws"
 )
 
@@ -79,6 +80,7 @@ func main() {
 	r.POST("/auth/login", auth.Login)
 	r.POST("/auth/pin-login", auth.PINLogin)
 	r.POST("/auth/reset-password", auth.ResetPassword)
+	r.POST("/auth/refresh", auth.RefreshToken)
 
 	// ── Protected route group (require valid JWT) ────────────
 	protected := r.Group("/api/v1")
@@ -179,9 +181,25 @@ func main() {
 	protected.GET("/chat/rooms/:id/messages", chat.GetMessages)
 	protected.POST("/chat/rooms/:id/messages", chat.SendMessage)
 	protected.POST("/chat/rooms/:id/seen", chat.MarkSeen)
+	protected.DELETE("/chat/rooms/:id/messages", chat.ClearMessages)
+	protected.PUT("/chat/rooms/:id/messages/:msgId", chat.EditMessage)
+	protected.DELETE("/chat/rooms/:id/messages/:msgId", chat.DeleteMessage)
 	// WS endpoint: outside protected group (browsers can't send auth headers on WS upgrade)
 	// Auth is handled via ?token= query param inside the handler
 	r.GET("/api/v1/chat/ws", chat.WebSocket)
+
+	// ── Notifications & Push ────────────────────────────────
+	notifHandler := &handlers.NotificationHandler{DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger}
+	protected.GET("/notifications", notifHandler.List)
+	protected.GET("/notifications/unread-count", notifHandler.UnreadCount)
+	protected.POST("/notifications", notifHandler.Create)
+	protected.PATCH("/notifications/:id/read", notifHandler.MarkRead)
+	protected.POST("/notifications/read-all", notifHandler.MarkAllRead)
+	protected.DELETE("/notifications/:id", notifHandler.Delete)
+	protected.DELETE("/notifications", notifHandler.ClearAll)
+	protected.GET("/push/vapid-key", notifHandler.VAPIDKey)
+	protected.POST("/push/subscribe", notifHandler.Subscribe)
+	protected.DELETE("/push/subscribe", notifHandler.Unsubscribe)
 
 	// ── System status ───────────────────────────────────────
 	statusHandler := &handlers.StatusHandler{Hub: eventHub, Log: appLogger}
@@ -199,6 +217,9 @@ func main() {
 			handlers.PurgeDeletedUsers(db, appLogger)
 		}
 	}()
+
+	// ── Cron: reminder worker (fires scheduled notifications) ──
+	go workers.StartReminderWorker(db, wsHub, notifHandler.SendPush, appLogger)
 
 	// Start the server with explicit timeouts that won't kill WebSocket connections.
 	// ReadHeaderTimeout guards the initial handshake; no ReadTimeout/WriteTimeout

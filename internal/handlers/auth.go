@@ -2,12 +2,15 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
 	"jarvishomeassist-brain/internal/config"
@@ -32,8 +35,9 @@ type pinLoginRequest struct {
 }
 
 type loginResponse struct {
-	Token string       `json:"token"`
-	User  userResponse `json:"user"`
+	Token        string       `json:"token"`
+	RefreshToken string       `json:"refresh_token"`
+	User         userResponse `json:"user"`
 }
 
 type userResponse struct {
@@ -73,6 +77,24 @@ func (h *AuthHandler) recordLogin(ctx context.Context, user *models.User) {
 		"access_count":  gorm.Expr("access_count + 1"),
 	})
 	user.LastLoginAt = &now
+}
+
+// generateRefreshToken creates a random 64-byte hex token and stores its
+// bcrypt hash on the user row. Returns the raw token to send to the client.
+func (h *AuthHandler) generateRefreshToken(ctx context.Context, user *models.User) (string, error) {
+	raw := make([]byte, 64)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(raw)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+
+	h.DB.WithContext(ctx).Model(user).Update("refresh_token", string(hash))
+	return token, nil
 }
 
 // Login handles POST /auth/login (email + password).
@@ -133,8 +155,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	refreshToken, err := h.generateRefreshToken(ctx, &user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "token_error",
+			"message": "Failed to generate refresh token",
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, loginResponse{
-		Token: signed,
+		Token:        signed,
+		RefreshToken: refreshToken,
 		User: userResponse{
 			ID:          user.ID,
 			Email:       user.Email,
@@ -239,8 +271,18 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 		return
 	}
 
+	refreshToken, err := h.generateRefreshToken(ctx, &user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "token_error",
+			"message": "Failed to generate refresh token",
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, loginResponse{
-		Token: signed,
+		Token:        signed,
+		RefreshToken: refreshToken,
 		User: userResponse{
 			ID:          user.ID,
 			Email:       user.Email,
@@ -306,4 +348,83 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successful"})
+}
+
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// RefreshToken handles POST /auth/refresh.
+// Validates the refresh token, issues a new JWT + new refresh token (rotation).
+func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "message": "refresh_token is required"})
+		return
+	}
+
+	// Extract the email from the expired JWT if present (allows refresh after expiry)
+	var email string
+	if header := c.GetHeader("Authorization"); header != "" && len(header) > 7 {
+		tokenStr := header[7:]
+		// Parse without validation so we can read claims from expired tokens
+		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+		token, _, err := parser.ParseUnverified(tokenStr, jwt.MapClaims{})
+		if err == nil {
+			if claims, ok := token.Claims.(jwt.MapClaims); ok {
+				email, _ = claims["email"].(string)
+			}
+		}
+	}
+
+	if email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Could not identify user"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var user models.User
+	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "User not found"})
+		return
+	}
+
+	if user.IsLocked {
+		c.JSON(http.StatusForbidden, gin.H{"error": "account_locked", "message": "Account is locked"})
+		return
+	}
+
+	// Verify refresh token against stored hash
+	if user.RefreshToken == "" || bcrypt.CompareHashAndPassword([]byte(user.RefreshToken), []byte(req.RefreshToken)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_refresh_token", "message": "Refresh token is invalid or revoked"})
+		return
+	}
+
+	// Issue new JWT
+	signed, err := h.issueJWT(&user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token_error", "message": "Failed to generate token"})
+		return
+	}
+
+	// Rotate refresh token (old one is now invalid)
+	newRefresh, err := h.generateRefreshToken(ctx, &user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token_error", "message": "Failed to generate refresh token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, loginResponse{
+		Token:        signed,
+		RefreshToken: newRefresh,
+		User: userResponse{
+			ID:          user.ID,
+			Email:       user.Email,
+			DisplayName: user.DisplayName,
+			Role:        string(user.Role),
+			LastLoginAt: user.LastLoginAt,
+		},
+	})
 }

@@ -511,6 +511,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		RoomID:    uint(roomID),
 		SenderID:  &user.ID,
 		Sender:    user,
+
 		Role:      "user",
 		Status:    "sent",
 		Content:   content,
@@ -573,6 +574,111 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, msg)
+}
+
+// EditMessage updates the content of a message the user owns.
+// PUT /api/v1/chat/rooms/:id/messages/:msgId
+func (h *ChatHandler) EditMessage(c *gin.Context) {
+	user, err := h.currentUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
+		return
+	}
+
+	roomID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_room_id"})
+		return
+	}
+
+	msgID, err := strconv.ParseUint(c.Param("msgId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_message_id"})
+		return
+	}
+
+	var body struct {
+		Content string `json:"content" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "content_required"})
+		return
+	}
+
+	var msg models.ChatMessage
+	if err := h.DB.First(&msg, msgID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "message_not_found"})
+		return
+	}
+
+	if msg.RoomID != uint(roomID) || msg.SenderID == nil || *msg.SenderID != user.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not_your_message"})
+		return
+	}
+
+	msg.Content = body.Content
+	if err := h.DB.Save(&msg).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_update"})
+		return
+	}
+
+	h.DB.Preload("Sender").First(&msg, msg.ID)
+
+	h.WSHub.BroadcastToRoom(uint(roomID), ws.Message{
+		Type: "chat:edited",
+		Data: msg,
+	})
+
+	c.JSON(http.StatusOK, msg)
+}
+
+// DeleteMessage deletes a single message the user owns.
+// DELETE /api/v1/chat/rooms/:id/messages/:msgId
+func (h *ChatHandler) DeleteMessage(c *gin.Context) {
+	user, err := h.currentUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
+		return
+	}
+
+	roomID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_room_id"})
+		return
+	}
+
+	msgID, err := strconv.ParseUint(c.Param("msgId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_message_id"})
+		return
+	}
+
+	var msg models.ChatMessage
+	if err := h.DB.First(&msg, msgID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "message_not_found"})
+		return
+	}
+
+	if msg.RoomID != uint(roomID) || msg.SenderID == nil || *msg.SenderID != user.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not_your_message"})
+		return
+	}
+
+	if err := h.DB.Delete(&msg).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_delete"})
+		return
+	}
+
+	h.WSHub.BroadcastToRoom(uint(roomID), ws.Message{
+		Type: "chat:deleted",
+		Data: map[string]interface{}{
+			"room_id":    roomID,
+			"message_id": msgID,
+			"deleted_by": user.ID,
+		},
+	})
+
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
 // MarkSeen updates the read receipt for a user in a room.
@@ -947,22 +1053,36 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 			break
 		}
 
-		// CF Workers AI sends: data: {"response":"token"}
+		// Parse SSE chunk — supports both Workers AI format {"response":"..."}
+		// and OpenAI-compatible format {"choices":[{"delta":{"content":"..."}}]}
 		var chunk struct {
 			Response string `json:"response"`
+			Choices  []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
 
-		fullResponse.WriteString(chunk.Response)
+		token := chunk.Response
+		if token == "" && len(chunk.Choices) > 0 {
+			token = chunk.Choices[0].Delta.Content
+		}
+		if token == "" {
+			continue
+		}
+
+		fullResponse.WriteString(token)
 
 		// Broadcast streaming token
 		h.WSHub.BroadcastToRoom(roomID, ws.Message{
 			Type: "chat:ai_stream",
 			Data: map[string]interface{}{
 				"room_id": roomID,
-				"token":   chunk.Response,
+				"token":   token,
 				"partial": fullResponse.String(),
 			},
 		})
@@ -1048,6 +1168,76 @@ func (h *ChatHandler) readImageAsBase64(mediaURL string) string {
 		mime = "image/webp"
 	}
 	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data))
+}
+
+// ClearMessages deletes all messages and read receipts in a room.
+// DELETE /api/v1/chat/rooms/:id/messages
+func (h *ChatHandler) ClearMessages(c *gin.Context) {
+	user, err := h.currentUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
+		return
+	}
+
+	roomID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_room_id"})
+		return
+	}
+
+	var room models.ChatRoom
+	if err := h.DB.First(&room, roomID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "room_not_found"})
+		return
+	}
+
+	if !h.canAccessRoom(&room, user.ID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access_denied"})
+		return
+	}
+
+	tx := h.DB.Begin()
+
+	// Delete read receipts for this room
+	if err := tx.Where("room_id = ?", roomID).Delete(&models.ChatReadReceipt{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear read receipts"})
+		return
+	}
+
+	// Delete all messages in the room
+	result := tx.Where("room_id = ?", roomID).Delete(&models.ChatMessage{})
+	if result.Error != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear messages"})
+		return
+	}
+
+	// Reset denormalized fields on the room
+	if err := tx.Model(&room).Updates(map[string]interface{}{
+		"last_msg_text": nil,
+		"last_msg_at":   nil,
+		"last_msg_by":   nil,
+	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset room"})
+		return
+	}
+
+	tx.Commit()
+
+	h.Log.Info("chat", fmt.Sprintf("cleared %d messages in room %d by user %s", result.RowsAffected, roomID, user.Email))
+
+	// Notify connected clients so they can refresh
+	h.WSHub.BroadcastToRoom(uint(roomID), ws.Message{
+		Type: "chat:cleared",
+		Data: map[string]interface{}{
+			"room_id":    roomID,
+			"cleared_by": user.ID,
+		},
+	})
+
+	c.JSON(http.StatusOK, gin.H{"deleted": result.RowsAffected})
 }
 
 func (h *ChatHandler) saveAIError(roomID uint, errorMsg string) {

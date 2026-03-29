@@ -19,6 +19,9 @@ type Config struct {
 	CFAPIToken        string // Cloudflare API Token with Analytics read permissions
 	UploadBaseDir     string // Base directory for file uploads (default: ./uploads)
 	UploadChatSubdir  string // Subdirectory for chat uploads (default: chat)
+	VAPIDPublicKey    string // VAPID public key for Web Push (optional)
+	VAPIDPrivateKey   string // VAPID private key for Web Push (optional)
+	VAPIDContact      string // VAPID contact email (e.g. mailto:admin@example.com)
 }
 
 // Load reads configuration from environment variables.
@@ -56,6 +59,9 @@ func Load() (*Config, error) {
 		CFAPIToken:       os.Getenv("CF_API_TOKEN"),
 		UploadBaseDir:    envOrDefault("UPLOAD_BASE_DIR", "./uploads"),
 		UploadChatSubdir: envOrDefault("UPLOAD_CHAT_SUBDIR", "chat"),
+		VAPIDPublicKey:   os.Getenv("VAPID_PUBLIC_KEY"),
+		VAPIDPrivateKey:  os.Getenv("VAPID_PRIVATE_KEY"),
+		VAPIDContact:     envOrDefault("VAPID_CONTACT", "mailto:admin@homelab.local"),
 	}, nil
 }
 

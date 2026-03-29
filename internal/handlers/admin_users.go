@@ -792,7 +792,10 @@ func (h *AdminUserHandler) RevokeTokens(c *gin.Context) {
 		return
 	}
 
-	if err := h.DB.WithContext(ctx).Model(&user).Update("token_rev", gorm.Expr("token_rev + 1")).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Model(&user).Updates(map[string]interface{}{
+		"token_rev":     gorm.Expr("token_rev + 1"),
+		"refresh_token": "",
+	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to revoke tokens"})
 		return
 	}
