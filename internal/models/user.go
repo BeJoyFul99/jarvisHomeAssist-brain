@@ -123,9 +123,9 @@ type User struct {
 	PermExpiresAt *time.Time     `json:"perm_expires_at"`
 	Phone         string         `gorm:"size:50" json:"phone"`
 	IsLocked      bool           `gorm:"not null;default:false" json:"is_locked"`
-	TokenRev      int64          `gorm:"not null;default:0" json:"-"`
+	JWTToken      string         `gorm:"size:512" json:"-"`          // bcrypt hash of current access token (empty = revoked)
 	AccessCount   int64          `gorm:"not null;default:0" json:"access_count"`
-	RefreshToken  string         `gorm:"size:512" json:"-"`
+	RefreshToken  string         `gorm:"size:512" json:"-"`          // bcrypt hash of current refresh token (empty = revoked)
 	FCMToken      string         `gorm:"size:512" json:"-"`
 	LastLoginAt   *time.Time     `json:"last_login_at"`
 	// Password reset token and expiry used for password reset flows.

@@ -12,7 +12,8 @@ type Config struct {
 	Port              string
 	DatabaseURL       string
 	JWTSecret         string
-	JWTExpiry         time.Duration
+	JWTExpiry         time.Duration // Access token lifetime (short, e.g. 15m)
+	RefreshExpiry     time.Duration // Refresh token lifetime (long, e.g. 7 days)
 	CFWorkerURL       string // Cloudflare Worker AI endpoint (optional)
 	CFWorkerSecret    string // Shared secret for CF Worker auth (optional)
 	CFAccountID       string // Cloudflare Account ID (for Analytics Engine queries)
@@ -46,13 +47,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("JWT_SECRET environment variable is required")
 	}
 
-	expiryHours, _ := strconv.Atoi(envOrDefault("JWT_EXPIRY_HOURS", "24"))
+	expiryMinutes, _ := strconv.Atoi(envOrDefault("JWT_EXPIRY_MINUTES", "15"))
+	refreshExpiryDays, _ := strconv.Atoi(envOrDefault("REFRESH_EXPIRY_DAYS", "7"))
 
 	return &Config{
 		Port:             envOrDefault("BRAIN_PORT", "5000"),
 		DatabaseURL:      dbURL,
 		JWTSecret:        jwtSecret,
-		JWTExpiry:        time.Duration(expiryHours) * time.Hour,
+		JWTExpiry:        time.Duration(expiryMinutes) * time.Minute,
+		RefreshExpiry:    time.Duration(refreshExpiryDays) * 24 * time.Hour,
 		CFWorkerURL:      os.Getenv("CF_WORKER_URL"),
 		CFWorkerSecret:   os.Getenv("CF_WORKER_SECRET"),
 		CFAccountID:      os.Getenv("CF_ACCOUNT_ID"),

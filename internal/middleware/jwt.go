@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 
@@ -12,8 +14,11 @@ import (
 )
 
 // JWTAuth returns a Gin middleware that validates Bearer tokens.
-// On success it sets "user_email" and "user_role" on the context.
-func JWTAuth(secret string) gin.HandlerFunc {
+// It verifies the JWT signature/expiry, then checks that the token matches
+// the bcrypt hash stored on the user row (so clearing jwt_token instantly
+// revokes the session).
+// On success it sets "user_email", "user_role", and "user_name" on the context.
+func JWTAuth(secret string, db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" || !strings.HasPrefix(header, "Bearer ") {
@@ -44,6 +49,44 @@ func JWTAuth(secret string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_claims",
 				"message": "Could not parse token claims",
+			})
+			return
+		}
+
+		email, _ := claims["email"].(string)
+
+		// Verify the token is still the active one stored in the database
+		var user models.User
+		if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   "invalid_token",
+				"message": "User not found",
+			})
+			return
+		}
+
+		if user.IsLocked {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "account_locked",
+				"message": "Account is locked",
+			})
+			return
+		}
+
+		// If jwt_token is empty the session has been revoked (logout / admin revoke)
+		if user.JWTToken == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   "token_revoked",
+				"message": "Session has been revoked, please login again",
+			})
+			return
+		}
+
+		tokenHash := sha256.Sum256([]byte(tokenStr))
+		if hex.EncodeToString(tokenHash[:]) != user.JWTToken {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   "token_revoked",
+				"message": "Session has been revoked, please login again",
 			})
 			return
 		}

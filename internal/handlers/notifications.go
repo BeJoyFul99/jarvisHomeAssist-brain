@@ -318,12 +318,22 @@ func (h *NotificationHandler) deliver(notif models.Notification) {
 		Data: notif,
 	})
 
-	// Web Push
-	h.SendPush(notif.UserID, notif.Title, notif.Message)
+	// Web Push — include category and action_url so the service worker
+	// can apply chat-specific behaviour (grouping, navigation, etc.)
+	actionURL := ""
+	if notif.ActionURL != nil {
+		actionURL = *notif.ActionURL
+	}
+	h.sendPush(notif.UserID, notif.Title, notif.Message, notif.Category, actionURL)
 }
 
 // SendPush sends a Web Push notification to all devices registered for a user.
+// Public wrapper kept for backward compat (reminder worker, etc.).
 func (h *NotificationHandler) SendPush(userID uint, title, message string) {
+	h.sendPush(userID, title, message, "", "")
+}
+
+func (h *NotificationHandler) sendPush(userID uint, title, message, category, actionURL string) {
 	if h.Cfg.VAPIDPublicKey == "" || h.Cfg.VAPIDPrivateKey == "" {
 		return // push not configured
 	}
@@ -331,7 +341,7 @@ func (h *NotificationHandler) SendPush(userID uint, title, message string) {
 	var subs []models.PushSubscription
 	h.DB.Where("user_id = ?", userID).Find(&subs)
 
-	payload := fmt.Sprintf(`{"title":%q,"message":%q}`, title, message)
+	payload := fmt.Sprintf(`{"title":%q,"message":%q,"category":%q,"action_url":%q}`, title, message, category, actionURL)
 
 	for _, sub := range subs {
 		s := &webpush.Subscription{
@@ -360,6 +370,24 @@ func (h *NotificationHandler) SendPush(userID uint, title, message string) {
 			h.Log.Info("push", fmt.Sprintf("removed expired subscription %d", sub.ID))
 		}
 	}
+}
+
+// DeliverChatNotification creates a persisted notification for a new chat
+// message and delivers it via WebSocket + Web Push.
+func (h *NotificationHandler) DeliverChatNotification(userID uint, title, body, actionURL string) {
+	notif := models.Notification{
+		UserID:    userID,
+		Title:     title,
+		Message:   body,
+		Type:      "info",
+		Category:  "chat",
+		ActionURL: &actionURL,
+	}
+	if err := h.DB.Create(&notif).Error; err != nil {
+		h.Log.Error("notification", fmt.Sprintf("failed to create chat notification: %v", err))
+		return
+	}
+	h.deliver(notif)
 }
 
 func defaultStr(val, fallback string) string {

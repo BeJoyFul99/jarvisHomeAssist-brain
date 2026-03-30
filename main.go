@@ -82,9 +82,14 @@ func main() {
 	r.POST("/auth/reset-password", auth.ResetPassword)
 	r.POST("/auth/refresh", auth.RefreshToken)
 
+	// Logout requires a valid JWT to identify the user
+	logoutGroup := r.Group("/auth")
+	logoutGroup.Use(middleware.JWTAuth(cfg.JWTSecret, db))
+	logoutGroup.POST("/logout", auth.Logout)
+
 	// ── Protected route group (require valid JWT) ────────────
 	protected := r.Group("/api/v1")
-	protected.Use(middleware.JWTAuth(cfg.JWTSecret))
+	protected.Use(middleware.JWTAuth(cfg.JWTSecret, db))
 	protected.Use(middleware.RateLimiter()) // Apply rate limiting to all protected routes
 
 	// ── SSE hub for real-time events ─────────────────────────
@@ -172,7 +177,12 @@ func main() {
 
 	// ── Chat (real-time messaging + AI) ─────────────────────
 	wsHub := ws.NewHub(appLogger)
-	chat := &handlers.ChatHandler{DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger}
+	// Create notifHandler early so we can wire chat → notification delivery
+	notifHandler := &handlers.NotificationHandler{DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger}
+	chat := &handlers.ChatHandler{
+		DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger,
+		Notify: notifHandler.DeliverChatNotification,
+	}
 	protected.GET("/chat/rooms", chat.ListRooms)
 	protected.POST("/chat/rooms", chat.CreateRoom)
 	protected.GET("/chat/users", chat.ListUsers)
@@ -188,8 +198,20 @@ func main() {
 	// Auth is handled via ?token= query param inside the handler
 	r.GET("/api/v1/chat/ws", chat.WebSocket)
 
+	// ── Announcements ──────────────────────────────────────
+	announcements := &handlers.AnnouncementHandler{
+		DB: db, Hub: eventHub, WSHub: wsHub, Cfg: cfg, Log: appLogger,
+		Notify: notifHandler.DeliverChatNotification,
+	}
+	protected.GET("/announcements", announcements.List)
+	protected.GET("/announcements/:id", announcements.Get)
+	protected.POST("/announcements/:id/read", announcements.MarkRead)
+	admin.POST("/announcements", announcements.Create)
+	admin.PATCH("/announcements/:id", announcements.Update)
+	admin.DELETE("/announcements/:id", announcements.Delete)
+	admin.GET("/announcements/:id/reads", announcements.ReadReceipts)
+
 	// ── Notifications & Push ────────────────────────────────
-	notifHandler := &handlers.NotificationHandler{DB: db, WSHub: wsHub, Cfg: cfg, Log: appLogger}
 	protected.GET("/notifications", notifHandler.List)
 	protected.GET("/notifications/unread-count", notifHandler.UnreadCount)
 	protected.POST("/notifications", notifHandler.Create)

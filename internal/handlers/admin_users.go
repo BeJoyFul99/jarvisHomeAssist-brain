@@ -425,8 +425,9 @@ func (h *AdminUserHandler) RegeneratePIN(c *gin.Context) {
 		return
 	}
 
-	// Increment token_rev to invalidate existing sessions
-	user.TokenRev++
+	// Clear JWT + refresh tokens to invalidate existing sessions
+	user.JWTToken = ""
+	user.RefreshToken = ""
 
 	if err := h.DB.WithContext(ctx).Save(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to save new PIN"})
@@ -793,7 +794,7 @@ func (h *AdminUserHandler) RevokeTokens(c *gin.Context) {
 	}
 
 	if err := h.DB.WithContext(ctx).Model(&user).Updates(map[string]interface{}{
-		"token_rev":     gorm.Expr("token_rev + 1"),
+		"jwt_token":     "",
 		"refresh_token": "",
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to revoke tokens"})

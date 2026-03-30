@@ -152,6 +152,24 @@ func (h *Hub) SendToUser(userID uint, msg Message) {
 	}
 }
 
+// ConnectedUserIDsInRoom returns the set of user IDs that currently have an
+// active WebSocket connection with access to the given room.
+func (h *Hub) ConnectedUserIDsInRoom(roomID uint) map[uint]struct{} {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	ids := make(map[uint]struct{})
+	for c := range h.clients {
+		c.mu.RLock()
+		_, hasRoom := c.RoomIDs[roomID]
+		c.mu.RUnlock()
+		if hasRoom {
+			ids[c.UserID] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // AddRoomToClient grants a client access to a room for broadcast filtering.
 func (h *Hub) AddRoomToClient(client *Client, roomID uint) {
 	client.mu.Lock()

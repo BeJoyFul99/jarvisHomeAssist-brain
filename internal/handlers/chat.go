@@ -51,12 +51,19 @@ var wsUpgrader = websocket.Upgrader{
 	},
 }
 
+// ChatNotifyFunc is called to deliver a push/in-app notification for a new
+// chat message. It receives the target user ID, notification title, body, and
+// an action URL to open on click.
+type ChatNotifyFunc func(userID uint, title, body, actionURL string)
+
 // ChatHandler manages chat rooms, messages, and AI integration.
 type ChatHandler struct {
 	DB    *gorm.DB
 	WSHub *ws.Hub
 	Cfg   *config.Config
 	Log   *logger.Logger
+	// Notify is called to send push + in-app notifications for new messages.
+	Notify ChatNotifyFunc
 	// Semaphore to limit concurrent AI requests
 	aiSem chan struct{}
 	once  sync.Once
@@ -548,6 +555,11 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		Data: msg,
 	})
 
+	// Notify offline users (WhatsApp-style push + in-app notification)
+	if h.Notify != nil {
+		go h.notifyOfflineUsers(uint(roomID), user, room, preview)
+	}
+
 	// Determine if AI should respond
 	shouldAIRespond := false
 	switch room.Type {
@@ -574,6 +586,52 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, msg)
+}
+
+// notifyOfflineUsers sends a push + in-app notification to every room member
+// who does NOT currently have an active WebSocket connection to the room.
+// This gives a WhatsApp-style "new message" alert for users who aren't
+// looking at the chat.
+func (h *ChatHandler) notifyOfflineUsers(roomID uint, sender *models.User, room models.ChatRoom, preview string) {
+	// Find all users who should receive the notification
+	var recipientIDs []uint
+
+	switch room.Type {
+	case "group":
+		// Group rooms: all non-guest, non-deleted users are implicit members
+		h.DB.Model(&models.User{}).
+			Where("role <> ? AND id <> ?", models.RoleGuest, sender.ID).
+			Pluck("id", &recipientIDs)
+	case "DM":
+		// DM rooms: only the participants (loaded via join table)
+		var participants []models.User
+		h.DB.Model(&room).Association("Participants").Find(&participants)
+		for _, p := range participants {
+			if p.ID != sender.ID {
+				recipientIDs = append(recipientIDs, p.ID)
+			}
+		}
+	case "direct_ai":
+		// AI rooms are private — no one else to notify
+		return
+	}
+
+	if len(recipientIDs) == 0 {
+		return
+	}
+
+	// Determine who is already connected via WebSocket to this room
+	online := h.WSHub.ConnectedUserIDsInRoom(roomID)
+
+	title := fmt.Sprintf("%s in %s", sender.DisplayName, room.Name)
+	actionURL := "/chat"
+
+	for _, uid := range recipientIDs {
+		if _, connected := online[uid]; connected {
+			continue // user has WS open — they'll see the message in real-time
+		}
+		h.Notify(uid, title, preview, actionURL)
+	}
 }
 
 // EditMessage updates the content of a message the user owns.

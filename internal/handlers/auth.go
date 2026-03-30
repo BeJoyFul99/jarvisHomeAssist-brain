@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -10,12 +11,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
 	"jarvishomeassist-brain/internal/config"
 	"jarvishomeassist-brain/internal/models"
 )
+
+// sha256Hex returns the hex-encoded SHA-256 hash of s.
+// Used instead of bcrypt because JWTs and refresh tokens exceed bcrypt's
+// 72-byte input limit, and both are already high-entropy so a fast hash is safe.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
 
 // AuthHandler groups login-related dependencies.
 type AuthHandler struct {
@@ -48,8 +56,10 @@ type userResponse struct {
 	LastLoginAt *time.Time `json:"last_login_at"`
 }
 
-// issueJWT builds and signs a JWT for the given user.
-func (h *AuthHandler) issueJWT(user *models.User) (string, error) {
+// issueJWT builds, signs, and persists a short-lived JWT access token.
+// The bcrypt hash of the signed token is stored on the user row so the
+// middleware can verify it (and revocation is instant by clearing the column).
+func (h *AuthHandler) issueJWT(ctx context.Context, user *models.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":            user.Email,
 		"name":           user.DisplayName,
@@ -62,11 +72,19 @@ func (h *AuthHandler) issueJWT(user *models.User) (string, error) {
 			}
 			return nil
 		}(),
-		"token_rev": user.TokenRev,
-		"iat":       time.Now().Unix(),
-		"exp":       time.Now().Add(h.Cfg.JWTExpiry).Unix(),
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(h.Cfg.JWTExpiry).Unix(),
 	})
-	return token.SignedString([]byte(h.Cfg.JWTSecret))
+
+	signed, err := token.SignedString([]byte(h.Cfg.JWTSecret))
+	if err != nil {
+		return "", err
+	}
+
+	// Store a SHA-256 hash of the JWT so the middleware can validate it
+	h.DB.WithContext(ctx).Model(user).Update("jwt_token", sha256Hex(signed))
+
+	return signed, nil
 }
 
 // recordLogin updates access tracking fields.
@@ -80,7 +98,7 @@ func (h *AuthHandler) recordLogin(ctx context.Context, user *models.User) {
 }
 
 // generateRefreshToken creates a random 64-byte hex token and stores its
-// bcrypt hash on the user row. Returns the raw token to send to the client.
+// SHA-256 hash on the user row. Returns the raw token to send to the client.
 func (h *AuthHandler) generateRefreshToken(ctx context.Context, user *models.User) (string, error) {
 	raw := make([]byte, 64)
 	if _, err := rand.Read(raw); err != nil {
@@ -88,12 +106,7 @@ func (h *AuthHandler) generateRefreshToken(ctx context.Context, user *models.Use
 	}
 	token := hex.EncodeToString(raw)
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-
-	h.DB.WithContext(ctx).Model(user).Update("refresh_token", string(hash))
+	h.DB.WithContext(ctx).Model(user).Update("refresh_token", sha256Hex(token))
 	return token, nil
 }
 
@@ -146,7 +159,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	h.recordLogin(ctx, &user)
 
-	signed, err := h.issueJWT(&user)
+	signed, err := h.issueJWT(ctx, &user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "token_error",
@@ -262,7 +275,7 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 
 	h.recordLogin(ctx, &user)
 
-	signed, err := h.issueJWT(&user)
+	signed, err := h.issueJWT(ctx, &user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "token_error",
@@ -337,10 +350,11 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	// Clear reset token and expiry and bump token rev to invalidate sessions
+	// Clear reset token/expiry and revoke all sessions (clear JWT + refresh tokens)
 	user.PasswordResetToken = ""
 	user.PasswordResetExpiry = nil
-	user.TokenRev++
+	user.JWTToken = ""
+	user.RefreshToken = ""
 
 	if err := h.DB.WithContext(ctx).Save(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to save new password"})
@@ -396,14 +410,14 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Verify refresh token against stored hash
-	if user.RefreshToken == "" || bcrypt.CompareHashAndPassword([]byte(user.RefreshToken), []byte(req.RefreshToken)) != nil {
+	// Verify refresh token against stored SHA-256 hash
+	if user.RefreshToken == "" || sha256Hex(req.RefreshToken) != user.RefreshToken {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_refresh_token", "message": "Refresh token is invalid or revoked"})
 		return
 	}
 
 	// Issue new JWT
-	signed, err := h.issueJWT(&user)
+	signed, err := h.issueJWT(ctx, &user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token_error", "message": "Failed to generate token"})
 		return
@@ -427,4 +441,32 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 			LastLoginAt: user.LastLoginAt,
 		},
 	})
+}
+
+// Logout handles POST /auth/logout.
+// Clears both the JWT and refresh token from the database, instantly
+// invalidating the user's session.
+func (h *AuthHandler) Logout(c *gin.Context) {
+	email, _ := c.Get("user_email")
+	if email == nil || email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Could not identify user"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var user models.User
+	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "User not found"})
+		return
+	}
+
+	// Clear both tokens — JWT becomes invalid on next middleware check
+	h.DB.WithContext(ctx).Model(&user).Updates(map[string]interface{}{
+		"jwt_token":     "",
+		"refresh_token": "",
+	})
+
+	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
