@@ -159,7 +159,7 @@ func (h *ChatHandler) currentUser(c *gin.Context) (*models.User, error) {
 	defer cancel()
 
 	var user models.User
-	if err := h.DB.WithContext(ctx).Where("email = ?", emailStr).First(&user).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Where("email = ?", emailStr).Take(&user).Error; err != nil {
 		return nil, err
 	}
 	return &user, nil
@@ -886,7 +886,7 @@ func (h *ChatHandler) WebSocket(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_ticket"})
 		return
 	}
-	if err := h.DB.Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found"})
 		return
 	}

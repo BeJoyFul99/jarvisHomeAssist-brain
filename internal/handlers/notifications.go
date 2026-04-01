@@ -29,7 +29,7 @@ type NotificationHandler struct {
 func (h *NotificationHandler) currentUser(c *gin.Context) (*models.User, bool) {
 	email, _ := c.Get("user_email")
 	var user models.User
-	if err := h.DB.Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return nil, false
 	}

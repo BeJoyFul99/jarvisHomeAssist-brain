@@ -125,7 +125,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	defer cancel()
 
 	var user models.User
-	result := h.DB.WithContext(ctx).Where("email = ?", req.Email).First(&user)
+	result := h.DB.WithContext(ctx).Where("email = ?", req.Email).Take(&user)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -208,7 +208,7 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 
 	// If an email is provided, use the existing flow (email + PIN)
 	if req.Email != "" {
-		result := h.DB.WithContext(ctx).Where("email = ? AND role = ?", req.Email, models.RoleGuest).First(&user)
+		result := h.DB.WithContext(ctx).Where("email = ? AND role = ?", req.Email, models.RoleGuest).Take(&user)
 		if result.Error != nil {
 			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_credentials", "message": "Invalid email or PIN"})
@@ -219,7 +219,7 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 		}
 	} else if req.Name != "" {
 		// Name-based guest login
-		result := h.DB.WithContext(ctx).Where("display_name = ? AND role = ?", req.Name, models.RoleGuest).First(&user)
+		result := h.DB.WithContext(ctx).Where("display_name = ? AND role = ?", req.Name, models.RoleGuest).Take(&user)
 		if result.Error != nil {
 			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_credentials", "message": "Invalid name or PIN"})
@@ -400,7 +400,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	defer cancel()
 
 	var user models.User
-	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "User not found"})
 		return
 	}
@@ -457,7 +457,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	defer cancel()
 
 	var user models.User
-	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "User not found"})
 		return
 	}

@@ -57,7 +57,7 @@ func JWTAuth(secret string, db *gorm.DB) gin.HandlerFunc {
 
 		// Verify the token is still the active one stored in the database
 		var user models.User
-		if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		if err := db.Where("email = ?", email).Take(&user).Error; err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_token",
 				"message": "User not found",
@@ -110,7 +110,7 @@ func RequireResourcePerm(db *gorm.DB, perm string) gin.HandlerFunc {
 
 		email, _ := c.Get("user_email")
 		var user models.User
-		if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		if err := db.Where("email = ?", email).Take(&user).Error; err != nil {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":   "forbidden",
 				"message": "Access denied",

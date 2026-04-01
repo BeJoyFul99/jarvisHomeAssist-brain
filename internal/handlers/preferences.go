@@ -27,7 +27,7 @@ func (h *PreferencesHandler) Get(c *gin.Context) {
 	defer cancel()
 
 	var user models.User
-	if err := h.DB.WithContext(ctx).Select("preferences").Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Select("preferences").Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
@@ -58,7 +58,7 @@ func (h *PreferencesHandler) Update(c *gin.Context) {
 	defer cancel()
 
 	var user models.User
-	if err := h.DB.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+	if err := h.DB.WithContext(ctx).Where("email = ?", email).Take(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
