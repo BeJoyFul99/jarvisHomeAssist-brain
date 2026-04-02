@@ -98,15 +98,44 @@ func (h *AuthHandler) recordLogin(ctx context.Context, user *models.User) {
 }
 
 // generateRefreshToken creates a random 64-byte hex token and stores its
-// SHA-256 hash on the user row. Returns the raw token to send to the client.
-func (h *AuthHandler) generateRefreshToken(ctx context.Context, user *models.User) (string, error) {
+// SHA-256 hash in the refresh_tokens table. Returns the raw token to send to the client.
+func (h *AuthHandler) generateRefreshToken(ctx context.Context, user *models.User, oldTokenHash string) (string, error) {
 	raw := make([]byte, 64)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	token := hex.EncodeToString(raw)
+	hashed := sha256Hex(token)
 
-	h.DB.WithContext(ctx).Model(user).Update("refresh_token", sha256Hex(token))
+	err := h.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Mark old token as revoked if one is provided
+		if oldTokenHash != "" {
+			if err := tx.Model(&models.RefreshToken{}).Where("token_hash = ?", oldTokenHash).Update("is_revoked", true).Error; err != nil {
+				return err
+			}
+		}
+
+		// Insert new token into history
+		rt := models.RefreshToken{
+			UserID:    user.ID,
+			TokenHash: hashed,
+			IsRevoked: false,
+			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		}
+		if err := tx.Create(&rt).Error; err != nil {
+			return err
+		}
+
+		// Update legacy user field as well
+		if err := tx.Model(user).Update("refresh_token", hashed).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
 	return token, nil
 }
 
@@ -168,7 +197,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	refreshToken, err := h.generateRefreshToken(ctx, &user)
+	refreshToken, err := h.generateRefreshToken(ctx, &user, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "token_error",
@@ -284,7 +313,7 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 		return
 	}
 
-	refreshToken, err := h.generateRefreshToken(ctx, &user)
+	refreshToken, err := h.generateRefreshToken(ctx, &user, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "token_error",
@@ -355,6 +384,9 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	user.PasswordResetExpiry = nil
 	user.JWTToken = ""
 	user.RefreshToken = ""
+	
+	// Ensure we also revoke all tokens in the new table
+	h.DB.WithContext(ctx).Model(&models.RefreshToken{}).Where("user_id = ?", user.ID).Update("is_revoked", true)
 
 	if err := h.DB.WithContext(ctx).Save(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database_error", "message": "Failed to save new password"})
@@ -377,42 +409,38 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Extract the email from the expired JWT if present (allows refresh after expiry)
-	var email string
-	if header := c.GetHeader("Authorization"); header != "" && len(header) > 7 {
-		tokenStr := header[7:]
-		// Parse without validation so we can read claims from expired tokens
-		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-		token, _, err := parser.ParseUnverified(tokenStr, jwt.MapClaims{})
-		if err == nil {
-			if claims, ok := token.Claims.(jwt.MapClaims); ok {
-				email, _ = claims["email"].(string)
-			}
-		}
-	}
-
-	if email == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "Could not identify user"})
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	hashedRT := sha256Hex(req.RefreshToken)
+	
+	var rt models.RefreshToken
+	if err := h.DB.WithContext(ctx).Where("token_hash = ?", hashedRT).Take(&rt).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_refresh_token", "message": "Refresh token is invalid or not found"})
+		return
+	}
+
+	if rt.IsRevoked {
+		// REUSE DETECTED: A revoked token is being used! Revoke ALL active sessions for this user.
+		h.DB.WithContext(ctx).Model(&models.RefreshToken{}).Where("user_id = ?", rt.UserID).Update("is_revoked", true)
+		h.DB.WithContext(ctx).Model(&models.User{}).Where("id = ?", rt.UserID).Update("refresh_token", "")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token_reuse_detected", "message": "Refresh token reuse detected. All sessions revoked."})
+		return
+	}
+
+	if time.Now().After(rt.ExpiresAt) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "expired_refresh_token", "message": "Refresh token expired"})
+		return
+	}
+
 	var user models.User
-	if err := h.DB.WithContext(ctx).Where("email = ?", email).Take(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "message": "User not found"})
+	if err := h.DB.WithContext(ctx).Take(&user, rt.UserID).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_not_found", "message": "User not found"})
 		return
 	}
 
 	if user.IsLocked {
 		c.JSON(http.StatusForbidden, gin.H{"error": "account_locked", "message": "Account is locked"})
-		return
-	}
-
-	// Verify refresh token against stored SHA-256 hash
-	if user.RefreshToken == "" || sha256Hex(req.RefreshToken) != user.RefreshToken {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_refresh_token", "message": "Refresh token is invalid or revoked"})
 		return
 	}
 
@@ -423,8 +451,8 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Rotate refresh token (old one is now invalid)
-	newRefresh, err := h.generateRefreshToken(ctx, &user)
+	// Rotate refresh token: pass old token hash to mark it revoked
+	newRefresh, err := h.generateRefreshToken(ctx, &user, hashedRT)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token_error", "message": "Failed to generate refresh token"})
 		return
@@ -467,6 +495,9 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		"jwt_token":     "",
 		"refresh_token": "",
 	})
+
+	// Also revoke all tokens in the new table
+	h.DB.WithContext(ctx).Model(&models.RefreshToken{}).Where("user_id = ?", user.ID).Update("is_revoked", true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
