@@ -370,3 +370,45 @@ func TestBillHandler_UpdateLineItem_WrongBill_404(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestBillHandler_MarkPaid_Full(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.POST("/utility-bills/:id/mark-paid", h.MarkPaid)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	body := `{"paid_amount":123.45,"paid_date":"2026-04-22"}`
+	req, _ := http.NewRequest(http.MethodPost,
+		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"/mark-paid",
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var reloaded models.UtilityBill
+	require.NoError(t, db.First(&reloaded, bill.ID).Error)
+	require.Equal(t, "paid", reloaded.PaymentStatus)
+	require.NotNil(t, reloaded.PaidAmount)
+	require.InDelta(t, 123.45, *reloaded.PaidAmount, 0.001)
+}
+
+func TestBillHandler_MarkPaid_Partial(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.POST("/utility-bills/:id/mark-paid", h.MarkPaid)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	body := `{"paid_amount":50.00}`
+	req, _ := http.NewRequest(http.MethodPost,
+		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"/mark-paid",
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var reloaded models.UtilityBill
+	require.NoError(t, db.First(&reloaded, bill.ID).Error)
+	require.Equal(t, "partial", reloaded.PaymentStatus)
+}

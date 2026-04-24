@@ -346,3 +346,47 @@ func (h *BillHandler) UpdateLineItem(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, li)
 }
+
+// POST /api/v1/utility-bills/:id/mark-paid — body: {paid_amount, paid_date (opt)}
+func (h *BillHandler) MarkPaid(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		PaidAmount float64 `json:"paid_amount" binding:"required"`
+		PaidDate   string  `json:"paid_date"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	var bill models.UtilityBill
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+	bill.PaidAmount = &body.PaidAmount
+	switch {
+	case body.PaidAmount >= bill.TotalAmount:
+		bill.PaymentStatus = "paid"
+	case body.PaidAmount > 0:
+		bill.PaymentStatus = "partial"
+	default:
+		bill.PaymentStatus = "unpaid"
+	}
+	if body.PaidDate != "" {
+		if t, err := time.Parse("2006-01-02", body.PaidDate); err == nil {
+			bill.PaidDate = &t
+		}
+	} else {
+		now := time.Now().UTC()
+		bill.PaidDate = &now
+	}
+	if err := h.DB.WithContext(c.Request.Context()).Save(&bill).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save"})
+		return
+	}
+	c.JSON(http.StatusOK, bill)
+}
