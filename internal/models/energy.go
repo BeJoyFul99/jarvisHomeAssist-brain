@@ -27,13 +27,16 @@ type EnergyRate struct {
 }
 
 // EnergyBudget stores monthly energy budget settings.
+// PropertyID is nullable for backward-compat with pre-utility budgets (spec §2.6).
 type EnergyBudget struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	Month         int       `gorm:"not null" json:"month"`           // 1-12
-	Year          int       `gorm:"not null" json:"year"`
-	BudgetKWh     float64   `gorm:"not null;default:0" json:"budget_kwh"`
-	BudgetAmount  float64   `gorm:"not null;default:0" json:"budget_amount"` // dollar amount
-	Currency      string    `gorm:"size:8;not null;default:USD" json:"currency"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	Month             int       `gorm:"not null" json:"month"`
+	Year              int       `gorm:"not null" json:"year"`
+	BudgetKWh         float64   `gorm:"not null;default:0" json:"budget_kwh"`
+	BudgetAmount      float64   `gorm:"not null;default:0" json:"budget_amount"`
+	Currency          string    `gorm:"size:8;not null;default:USD" json:"currency"`
+	PropertyID        *uint     `gorm:"index" json:"property_id"`
+	AlertThresholdPct int       `gorm:"not null;default:80" json:"alert_threshold_pct"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
