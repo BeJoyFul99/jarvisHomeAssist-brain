@@ -12,8 +12,8 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o brain .
 
 # Stage 2
-FROM alpine:latest
-RUN apk add --no-cache ca-certificates
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates poppler-utils
 ARG PORT
 ENV PORT=${PORT}
 
