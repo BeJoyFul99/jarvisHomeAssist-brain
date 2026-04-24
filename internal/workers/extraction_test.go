@@ -46,7 +46,7 @@ func newLogger(t *testing.T) *logger.Logger {
 
 func seedBill(t *testing.T, db *gorm.DB) models.UtilityBill {
 	t.Helper()
-	require.NoError(t, db.AutoMigrate(&models.Property{}, &models.UtilityBill{}, &models.UtilityBillLineItem{}, &models.UtilityBillMeter{}))
+	require.NoError(t, db.AutoMigrate(&models.Property{}, &models.UtilityBill{}, &models.UtilityBillLineItem{}, &models.UtilityBillMeter{}, &models.UtilityBillNotification{}))
 	prop := models.Property{Name: "Home", Address: "1", Provider: "powerstream"}
 	require.NoError(t, db.Create(&prop).Error)
 	bill := models.UtilityBill{
@@ -108,4 +108,52 @@ func TestExtractionWorker_WritesResultAndBroadcasts(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("worker did not finish in time")
+}
+
+func TestExtractionWorker_FiresBillImportedNotification(t *testing.T) {
+	db := testutil.NewTestDB(t)
+	require.NoError(t, db.AutoMigrate(&models.Property{}, &models.UtilityBill{}, &models.UtilityBillLineItem{}, &models.UtilityBillMeter{}, &models.UtilityBillNotification{}))
+	// Force single connection (SQLite in-memory fix from Task 18).
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+
+	prop := models.Property{Name: "Home", Address: "1", Provider: "powerstream"}
+	require.NoError(t, db.Create(&prop).Error)
+	bill := models.UtilityBill{
+		PropertyID: prop.ID, UploadedBy: 1, FileHash: "trig1", FilePath: "bills/x.pdf",
+		Currency: "CAD", PaymentStatus: "unpaid", IngestionSource: "manual_upload",
+		ExtractionStatus: "processing",
+	}
+	require.NoError(t, db.Create(&bill).Error)
+
+	log := newLogger(t)
+	hub := sse.NewHub(log)
+	store := &stubStore{data: map[string][]byte{"bills/x.pdf": []byte("%PDF-1.4\n...")}}
+	extract := &stubExtractor{result: bills.ExtractResult{
+		Status: "completed", Method: "structured", Confidence: 95,
+		Parsed: bills.ParsedBill{
+			AccountNumber: "987654321", BillType: "REGULAR",
+			StatementDate: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			DueDate:       time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+			TotalAmount:   100, Currency: "CAD",
+		},
+	}}
+	jobs := make(chan workers.ExtractionJob, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go workers.RunExtractionWorker(ctx, jobs, db, store, extract, hub, log)
+	jobs <- workers.ExtractionJob{BillID: bill.ID}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int64
+		db.Model(&models.UtilityBillNotification{}).
+			Where("property_id = ? AND trigger = ?", bill.PropertyID, "bill_imported").
+			Count(&count)
+		if count == 1 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("bill_imported notification was not recorded")
 }

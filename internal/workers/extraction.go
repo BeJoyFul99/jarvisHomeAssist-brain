@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -146,6 +147,36 @@ func runOne(
 		Confidence: res.Confidence, NeedsReview: res.Status == "needs_review",
 	}})
 	hub.Broadcast(sse.Event{Type: sse.EventBillImported, Data: sse.BillExtractionEvent{BillID: bill.ID}})
+
+	if res.Status == "completed" || res.Status == "needs_review" {
+		evaluateAndFire(db, hub, &bill)
+	}
+}
+
+func evaluateAndFire(db *gorm.DB, hub *sse.Hub, bill *models.UtilityBill) {
+	var budget models.EnergyBudget
+	db.Where("property_id = ? AND month = ? AND year = ?",
+		bill.PropertyID,
+		int(bill.StatementDate.Month()),
+		bill.StatementDate.Year(),
+	).First(&budget)
+
+	proj, _ := bills.ProjectCost(db, bill.PropertyID, int(bill.StatementDate.Month()), bill.StatementDate.Year())
+	triggers := bills.EvaluateTriggers(*bill, budget, proj, time.Now().UTC())
+	period := bills.PeriodKey(*bill)
+
+	for _, tr := range triggers {
+		inserted, _ := bills.TryInsertNotification(db, bills.NotificationKey{
+			PropertyID: bill.PropertyID, BillID: &bill.ID,
+			Trigger: tr.Name, PeriodKey: period,
+		})
+		if inserted {
+			hub.Broadcast(sse.Event{
+				Type: "bill:alert:" + tr.Name,
+				Data: map[string]any{"bill_id": bill.ID, "reason": tr.Reason},
+			})
+		}
+	}
 }
 
 func markFailed(db *gorm.DB, hub *sse.Hub, bill *models.UtilityBill, msg string) {
