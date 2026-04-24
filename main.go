@@ -195,6 +195,12 @@ func main() {
 	protected.GET("/utility-bills/:id/pdf", billHandler.DownloadPDF)
 	admin.DELETE("/utility-bills/:id", billHandler.Delete)
 
+	// ── Utility budgets ─────────────────────────────────────
+	utilityBudgets := &handlers.UtilityBudgetHandler{DB: db}
+	protected.GET("/utility-budgets", utilityBudgets.List)
+	admin.POST("/utility-budgets", utilityBudgets.Upsert)
+	protected.GET("/utility-budgets/pace", utilityBudgets.Pace)
+
 	// ── Server logs (admin only) ────────────────────────────
 	logsHandler := &handlers.LogsHandler{Logger: appLogger}
 	admin.GET("/logs", logsHandler.List)

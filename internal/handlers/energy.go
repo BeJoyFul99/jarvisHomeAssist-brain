@@ -376,11 +376,13 @@ func (h *EnergyHandler) GetBudget(c *gin.Context) {
 // POST /api/v1/admin/energy/budget — set monthly budget.
 func (h *EnergyHandler) SetBudget(c *gin.Context) {
 	var body struct {
-		Month        int     `json:"month" binding:"required"`
-		Year         int     `json:"year" binding:"required"`
-		BudgetKWh    float64 `json:"budget_kwh"`
-		BudgetAmount float64 `json:"budget_amount"`
-		Currency     string  `json:"currency"`
+		Month             int     `json:"month" binding:"required"`
+		Year              int     `json:"year" binding:"required"`
+		BudgetKWh         float64 `json:"budget_kwh"`
+		BudgetAmount      float64 `json:"budget_amount"`
+		Currency          string  `json:"currency"`
+		PropertyID        *uint   `json:"property_id"`
+		AlertThresholdPct int     `json:"alert_threshold_pct"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -395,11 +397,13 @@ func (h *EnergyHandler) SetBudget(c *gin.Context) {
 	if result.Error != nil {
 		// Create new
 		budget = models.EnergyBudget{
-			Month:        body.Month,
-			Year:         body.Year,
-			BudgetKWh:    body.BudgetKWh,
-			BudgetAmount: body.BudgetAmount,
-			Currency:     cond(body.Currency != "", body.Currency, GetSetting(h.DB, "currency", "CAD")),
+			Month:             body.Month,
+			Year:              body.Year,
+			BudgetKWh:         body.BudgetKWh,
+			BudgetAmount:      body.BudgetAmount,
+			Currency:          cond(body.Currency != "", body.Currency, GetSetting(h.DB, "currency", "CAD")),
+			PropertyID:        body.PropertyID,
+			AlertThresholdPct: clampThreshold(body.AlertThresholdPct),
 		}
 		h.DB.WithContext(ctx).Create(&budget)
 	} else {
@@ -408,11 +412,20 @@ func (h *EnergyHandler) SetBudget(c *gin.Context) {
 		if body.Currency != "" {
 			budget.Currency = body.Currency
 		}
+		budget.PropertyID = body.PropertyID
+		budget.AlertThresholdPct = clampThreshold(body.AlertThresholdPct)
 		h.DB.WithContext(ctx).Save(&budget)
 	}
 
 	h.Hub.Broadcast(sse.Event{Type: "energy:budget_updated", Data: budget})
 	c.JSON(http.StatusOK, budget)
+}
+
+func clampThreshold(v int) int {
+	if v <= 0 || v > 100 {
+		return 80
+	}
+	return v
 }
 
 // ── Helpers ──────────────────────────────────────────────────
