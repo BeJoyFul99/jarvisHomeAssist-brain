@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -49,6 +50,8 @@ func newBillRouter(t *testing.T) (*gin.Engine, *gorm.DB, chan workers.Extraction
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("user_id", uint(1)); c.Next() })
 	r.POST("/utility-bills/upload", h.Upload)
+	r.POST("/utility-bills", h.ManualCreate)
+	r.POST("/utility-bills/:id/reextract", h.Reextract)
 
 	return r, db, jobs, store, h
 }
@@ -126,4 +129,61 @@ func TestBillHandler_Upload_RejectsNonPDF(t *testing.T) {
 	req.Header.Set("Content-Type", ct)
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestBillHandler_ManualCreate(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+
+	body := `{"property_id":1,"statement_date":"2026-04-01","due_date":"2026-04-21","bill_type":"REGULAR","total_amount":100,"currency":"CAD"}`
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/utility-bills", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	var bill models.UtilityBill
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &bill))
+	require.Equal(t, "manual_entry", bill.IngestionSource)
+	require.Equal(t, "completed", bill.ExtractionStatus)
+	require.NotNil(t, bill.ExtractionMethod)
+	require.Equal(t, "manual", *bill.ExtractionMethod)
+
+	var count int64
+	db.Model(&models.UtilityBill{}).Count(&count)
+	require.Equal(t, int64(1), count)
+}
+
+func TestBillHandler_Reextract_ResubmitsJob(t *testing.T) {
+	r, db, jobs, _, _ := newBillRouter(t)
+
+	bill := models.UtilityBill{
+		PropertyID: 1, UploadedBy: 1, FileHash: "abc", FilePath: "bills/x.pdf",
+		Currency: "CAD", PaymentStatus: "unpaid", IngestionSource: "manual_upload",
+		ExtractionStatus: "failed",
+	}
+	require.NoError(t, db.Create(&bill).Error)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/utility-bills/"+strconv.Itoa(int(bill.ID))+"/reextract", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	select {
+	case job := <-jobs:
+		require.Equal(t, bill.ID, job.BillID)
+	default:
+		t.Fatal("no job enqueued")
+	}
+
+	var reloaded models.UtilityBill
+	require.NoError(t, db.First(&reloaded, bill.ID).Error)
+	require.Equal(t, "processing", reloaded.ExtractionStatus)
+}
+
+func TestBillHandler_Reextract_404(t *testing.T) {
+	r, _, _, _, _ := newBillRouter(t)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/utility-bills/999/reextract", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }

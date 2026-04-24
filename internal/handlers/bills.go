@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -128,5 +129,83 @@ func (h *BillHandler) Upload(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusAccepted, gin.H{"bill_id": bill.ID})
+}
+
+// POST /api/v1/utility-bills — manual entry, no PDF. Spec §3.6.
+func (h *BillHandler) ManualCreate(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	uid, _ := userID.(uint)
+
+	var body struct {
+		PropertyID         uint    `json:"property_id" binding:"required"`
+		StatementDate      string  `json:"statement_date"`
+		DueDate            string  `json:"due_date"`
+		BillingPeriodStart string  `json:"billing_period_start"`
+		BillingPeriodEnd   string  `json:"billing_period_end"`
+		BillType           string  `json:"bill_type"`
+		TotalAmount        float64 `json:"total_amount"`
+		PreviousBalance    float64 `json:"previous_balance"`
+		LateFees           float64 `json:"late_fees"`
+		Currency           string  `json:"currency"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	parseDate := func(s string) (t time.Time) { t, _ = time.Parse("2006-01-02", s); return }
+	method := "manual"
+	bill := models.UtilityBill{
+		PropertyID:         body.PropertyID,
+		UploadedBy:         uid,
+		StatementDate:      parseDate(body.StatementDate),
+		DueDate:            parseDate(body.DueDate),
+		BillingPeriodStart: parseDate(body.BillingPeriodStart),
+		BillingPeriodEnd:   parseDate(body.BillingPeriodEnd),
+		BillType:           body.BillType,
+		TotalAmount:        body.TotalAmount,
+		PreviousBalance:    body.PreviousBalance,
+		LateFees:           body.LateFees,
+		Currency:           cond(body.Currency != "", body.Currency, "CAD"),
+		PaymentStatus:      "unpaid",
+		IngestionSource:    "manual_entry",
+		ExtractionStatus:   "completed",
+		ExtractionMethod:   &method,
+	}
+	if err := h.DB.Create(&bill).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "create bill"})
+		return
+	}
+	c.JSON(http.StatusCreated, bill)
+}
+
+// POST /api/v1/utility-bills/:id/reextract — reset and enqueue.
+func (h *BillHandler) Reextract(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var bill models.UtilityBill
+	if err := h.DB.First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+	if bill.FilePath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bill has no PDF to reextract (manual entry)"})
+		return
+	}
+	bill.ExtractionStatus = "processing"
+	bill.ExtractionError = nil
+	if err := h.DB.Save(&bill).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update status"})
+		return
+	}
+	select {
+	case h.Jobs <- workers.ExtractionJob{BillID: bill.ID}:
+	default:
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "queue saturated"})
+		return
+	}
 	c.JSON(http.StatusAccepted, gin.H{"bill_id": bill.ID})
 }
