@@ -10,11 +10,11 @@ import (
 // UtilityBill — one row per uploaded or manually entered utility bill. See spec §2.2.
 type UtilityBill struct {
 	ID                   uint           `gorm:"primaryKey" json:"id"`
-	PropertyID           uint           `gorm:"not null;uniqueIndex:ux_bill_property_hash" json:"property_id"`
-	UploadedBy           uint           `gorm:"not null" json:"uploaded_by"`
+	PropertyID           uint           `gorm:"not null;index;uniqueIndex:ux_bill_property_hash" json:"property_id"`
+	UploadedBy           uint           `gorm:"not null;index" json:"uploaded_by"`
 	FilePath             string         `gorm:"size:512" json:"file_path"`
 	FileHash             string         `gorm:"size:64;uniqueIndex:ux_bill_property_hash" json:"file_hash"`
-	StatementDate        time.Time      `json:"statement_date"`
+	StatementDate        time.Time      `gorm:"index:idx_bill_statement_date" json:"statement_date"`
 	DueDate              time.Time      `json:"due_date"`
 	BillingPeriodStart   time.Time      `json:"billing_period_start"`
 	BillingPeriodEnd     time.Time      `json:"billing_period_end"`
@@ -29,7 +29,7 @@ type UtilityBill struct {
 	PaidDate             *time.Time     `json:"paid_date"`
 	PaidAmount           *float64       `gorm:"type:decimal(12,2)" json:"paid_amount"`
 	IngestionSource      string         `gorm:"size:16;not null;default:manual_upload" json:"ingestion_source"`
-	ExtractionStatus     string         `gorm:"size:16;not null;default:processing" json:"extraction_status"`
+	ExtractionStatus     string         `gorm:"size:16;not null;default:processing;index:idx_bill_extraction_status" json:"extraction_status"`
 	ExtractionMethod     *string        `gorm:"size:16" json:"extraction_method"`
 	ExtractionConfidence *int           `json:"extraction_confidence"`
 	ExtractionError      *string        `gorm:"size:512" json:"extraction_error"`
