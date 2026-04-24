@@ -39,11 +39,17 @@ func (f *fakeStoreGet) Put(uint, string, string, []byte) (string, error) { retur
 func (f *fakeStoreGet) Get(string) ([]byte, error)                       { return f.data, nil }
 func (f *fakeStoreGet) Delete(string) error                               { return nil }
 
+type trackingStore struct{ onDelete func(string) }
+
+func (t *trackingStore) Put(uint, string, string, []byte) (string, error) { return "bills/x.pdf", nil }
+func (t *trackingStore) Get(string) ([]byte, error)                        { return nil, nil }
+func (t *trackingStore) Delete(p string) error                              { t.onDelete(p); return nil }
+
 func newBillRouter(t *testing.T) (*gin.Engine, *gorm.DB, chan workers.ExtractionJob, *fakeStore, *handlers.BillHandler) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db := testutil.NewTestDB(t)
-	require.NoError(t, db.AutoMigrate(&models.Property{}, &models.UtilityBill{}))
+	require.NoError(t, db.AutoMigrate(&models.Property{}, &models.UtilityBill{}, &models.UtilityBillNotification{}))
 	prop := models.Property{Name: "Home", Address: "1", Provider: "powerstream", IsActive: true}
 	require.NoError(t, db.Create(&prop).Error)
 
@@ -452,4 +458,47 @@ func TestBillHandler_DownloadPDF_ManualEntry_404(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/"+strconv.Itoa(int(b.ID))+"/pdf", nil)
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestBillHandler_Delete_Soft(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.DELETE("/utility-bills/:id", h.Delete)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodDelete, "/utility-bills/"+strconv.Itoa(int(bill.ID)), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	var check models.UtilityBill
+	require.Error(t, db.First(&check, bill.ID).Error)
+	require.NoError(t, db.Unscoped().First(&check, bill.ID).Error)
+}
+
+func TestBillHandler_Delete_Hard_CascadesAndRemovesFile(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	deleteCalls := 0
+	store := &trackingStore{onDelete: func(string) { deleteCalls++ }}
+	h := &handlers.BillHandler{DB: db, Store: store}
+	r.DELETE("/utility-bills/:id", h.Delete)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodDelete,
+		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"?hard=true", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	var check models.UtilityBill
+	require.Error(t, db.Unscoped().First(&check, bill.ID).Error)
+
+	var items []models.UtilityBillLineItem
+	require.NoError(t, db.Where("bill_id = ?", bill.ID).Find(&items).Error)
+	require.Empty(t, items)
+	var meters []models.UtilityBillMeter
+	require.NoError(t, db.Where("bill_id = ?", bill.ID).Find(&meters).Error)
+	require.Empty(t, meters)
+
+	require.Equal(t, 1, deleteCalls)
 }

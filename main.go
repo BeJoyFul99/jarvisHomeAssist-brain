@@ -187,6 +187,13 @@ func main() {
 	admin.POST("/utility-bills/upload", billHandler.Upload)
 	admin.POST("/utility-bills", billHandler.ManualCreate)
 	admin.POST("/utility-bills/:id/reextract", billHandler.Reextract)
+	protected.GET("/utility-bills", billHandler.List)
+	protected.GET("/utility-bills/:id", billHandler.Get)
+	admin.PATCH("/utility-bills/:id", billHandler.Update)
+	admin.PATCH("/utility-bills/:id/line-items/:line_id", billHandler.UpdateLineItem)
+	admin.POST("/utility-bills/:id/mark-paid", billHandler.MarkPaid)
+	protected.GET("/utility-bills/:id/pdf", billHandler.DownloadPDF)
+	admin.DELETE("/utility-bills/:id", billHandler.Delete)
 
 	// ── Server logs (admin only) ────────────────────────────
 	logsHandler := &handlers.LogsHandler{Logger: appLogger}

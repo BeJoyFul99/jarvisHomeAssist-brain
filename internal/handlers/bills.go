@@ -414,3 +414,49 @@ func (h *BillHandler) DownloadPDF(c *gin.Context) {
 	}
 	c.Data(http.StatusOK, "application/pdf", data)
 }
+
+// DELETE /api/v1/utility-bills/:id — soft by default; ?hard=true removes row + children + PDF.
+func (h *BillHandler) Delete(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	hard := c.Query("hard") == "true"
+
+	var bill models.UtilityBill
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+
+	if !hard {
+		if err := h.DB.WithContext(c.Request.Context()).Delete(&bill).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "soft delete"})
+			return
+		}
+		c.Status(http.StatusNoContent)
+		return
+	}
+
+	err = h.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillLineItem{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillMeter{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillNotification{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&bill).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hard delete"})
+		return
+	}
+	if bill.FilePath != "" && h.Store != nil {
+		_ = h.Store.Delete(bill.FilePath)
+	}
+	c.Status(http.StatusNoContent)
+}
