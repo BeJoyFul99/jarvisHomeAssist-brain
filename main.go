@@ -162,6 +162,13 @@ func main() {
 	admin.DELETE("/energy/rates/:id", energy.DeleteRate)
 	admin.POST("/energy/budget", energy.SetBudget)
 
+	// ── Properties (utility service addresses) ───────────────
+	properties := &handlers.PropertyHandler{DB: db}
+	protected.GET("/properties", properties.List)
+	admin.POST("/properties", properties.Create)
+	admin.PATCH("/properties/:id", properties.Update)
+	admin.DELETE("/properties/:id", properties.Delete)
+
 	// ── Server logs (admin only) ────────────────────────────
 	logsHandler := &handlers.LogsHandler{Logger: appLogger}
 	admin.GET("/logs", logsHandler.List)
