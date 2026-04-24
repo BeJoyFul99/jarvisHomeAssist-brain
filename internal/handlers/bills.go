@@ -256,3 +256,93 @@ func (h *BillHandler) Get(c *gin.Context) {
 	h.DB.WithContext(c.Request.Context()).Where("bill_id = ?", bill.ID).Find(&meters)
 	c.JSON(http.StatusOK, gin.H{"bill": bill, "line_items": items, "meters": meters})
 }
+
+// PATCH /api/v1/utility-bills/:id
+func (h *BillHandler) Update(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	allowed := map[string]bool{
+		"bill_type": true, "total_amount": true, "previous_balance": true,
+		"payments_received": true, "balance_forward": true, "late_fees": true,
+		"currency": true, "payment_status": true, "paid_date": true, "paid_amount": true,
+		"statement_date": true, "due_date": true,
+		"billing_period_start": true, "billing_period_end": true,
+	}
+	updates := map[string]any{}
+	for k, v := range body {
+		if allowed[k] {
+			updates[k] = v
+		}
+	}
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no updatable fields"})
+		return
+	}
+	var bill models.UtilityBill
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+	if err := h.DB.WithContext(c.Request.Context()).Model(&bill).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+		return
+	}
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, bill.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload"})
+		return
+	}
+	c.JSON(http.StatusOK, bill)
+}
+
+// PATCH /api/v1/utility-bills/:id/line-items/:line_id
+func (h *BillHandler) UpdateLineItem(c *gin.Context) {
+	billID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	lineID, err := strconv.ParseUint(c.Param("line_id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid line_id"})
+		return
+	}
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	allowed := map[string]bool{
+		"utility_type": true, "category": true, "description": true,
+		"usage_amount": true, "usage_unit": true, "rate": true, "amount": true,
+	}
+	updates := map[string]any{}
+	for k, v := range body {
+		if allowed[k] {
+			updates[k] = v
+		}
+	}
+	var li models.UtilityBillLineItem
+	if err := h.DB.WithContext(c.Request.Context()).
+		Where("id = ? AND bill_id = ?", lineID, billID).
+		First(&li).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "line item not found"})
+		return
+	}
+	if err := h.DB.WithContext(c.Request.Context()).Model(&li).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+		return
+	}
+	if err := h.DB.WithContext(c.Request.Context()).First(&li, li.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload"})
+		return
+	}
+	c.JSON(http.StatusOK, li)
+}

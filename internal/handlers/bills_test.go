@@ -304,3 +304,69 @@ func TestBillHandler_Get_404(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestBillHandler_Update_AllowedFields(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.PATCH("/utility-bills/:id", h.Update)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	body := `{"total_amount":200.00,"payment_status":"partial","paid_amount":50.00,"forbidden_field":"ignored"}`
+	req, _ := http.NewRequest(http.MethodPatch, "/utility-bills/"+strconv.Itoa(int(bill.ID)), bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var reloaded models.UtilityBill
+	require.NoError(t, db.First(&reloaded, bill.ID).Error)
+	require.InDelta(t, 200.00, reloaded.TotalAmount, 0.001)
+	require.Equal(t, "partial", reloaded.PaymentStatus)
+	require.NotNil(t, reloaded.PaidAmount)
+	require.InDelta(t, 50.00, *reloaded.PaidAmount, 0.001)
+}
+
+func TestBillHandler_UpdateLineItem(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.PATCH("/utility-bills/:id/line-items/:line_id", h.UpdateLineItem)
+
+	bill := seedBillWithChildren(t, db, 1)
+	var items []models.UtilityBillLineItem
+	require.NoError(t, db.Where("bill_id = ?", bill.ID).Find(&items).Error)
+	require.NotEmpty(t, items)
+	li := items[0]
+
+	w := httptest.NewRecorder()
+	body := `{"amount":30.00,"description":"Corrected tier 1"}`
+	req, _ := http.NewRequest(http.MethodPatch,
+		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"/line-items/"+strconv.Itoa(int(li.ID)),
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var reloaded models.UtilityBillLineItem
+	require.NoError(t, db.First(&reloaded, li.ID).Error)
+	require.InDelta(t, 30.00, reloaded.Amount, 0.001)
+	require.Equal(t, "Corrected tier 1", reloaded.Description)
+}
+
+func TestBillHandler_UpdateLineItem_WrongBill_404(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.PATCH("/utility-bills/:id/line-items/:line_id", h.UpdateLineItem)
+
+	bill := seedBillWithChildren(t, db, 1)
+	var items []models.UtilityBillLineItem
+	require.NoError(t, db.Where("bill_id = ?", bill.ID).Find(&items).Error)
+	li := items[0]
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPatch,
+		"/utility-bills/99/line-items/"+strconv.Itoa(int(li.ID)),
+		bytes.NewBufferString(`{"amount":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
