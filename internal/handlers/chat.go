@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
 
+	"jarvishomeassist-brain/internal/bills"
 	"jarvishomeassist-brain/internal/config"
 	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/models"
@@ -81,6 +82,31 @@ func (h *ChatHandler) initSem() {
 	h.once.Do(func() {
 		h.aiSem = make(chan struct{}, 3)
 	})
+}
+
+// buildUtilityContextIfRelevant returns a system-prompt prefix when the user's
+// message shows utility intent (§5.1/§5.2). Empty string otherwise.
+func (h *ChatHandler) buildUtilityContextIfRelevant(userMessage, pageURL string) string {
+	if !bills.DetectUtilityIntent(userMessage) {
+		return ""
+	}
+	prop, err := bills.ResolveProperty(h.DB, bills.ChatContextHints{
+		Message: userMessage,
+		PageURL: pageURL,
+	})
+	if err != nil || prop == nil {
+		return ""
+	}
+	ctx, err := bills.BuildChatContext(h.DB, prop.ID)
+	if err != nil || ctx == "" {
+		return ""
+	}
+	return ctx
+}
+
+// BuildUtilityContextIfRelevantForTest is a test-only wrapper.
+func (h *ChatHandler) BuildUtilityContextIfRelevantForTest(msg, page string) string {
+	return h.buildUtilityContextIfRelevant(msg, page)
 }
 
 // IssueTicket creates a short-lived single-use ticket for the given email.
@@ -1054,6 +1080,18 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 			}
 		}
 		messages = append(messages, aiMsg{Role: role, Content: content})
+	}
+
+	// Inject utility context into the system prompt when the message is utility-related.
+	lastUserMsg := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "user" {
+			lastUserMsg = history[i].Content
+			break
+		}
+	}
+	if utilityCtx := h.buildUtilityContextIfRelevant(lastUserMsg, ""); utilityCtx != "" {
+		messages = append([]aiMsg{{Role: "system", Content: utilityCtx}}, messages...)
 	}
 
 	// Call Cloudflare Worker
