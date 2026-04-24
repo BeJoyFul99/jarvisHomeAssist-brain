@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,33 @@ func mkMultipart(t *testing.T, propertyID string, filename string, data []byte) 
 	_, _ = fw.Write(data)
 	_ = mw.Close()
 	return body, mw.FormDataContentType()
+}
+
+func seedBillWithChildren(t *testing.T, db *gorm.DB, propertyID uint) models.UtilityBill {
+	t.Helper()
+	require.NoError(t, db.AutoMigrate(&models.UtilityBillLineItem{}, &models.UtilityBillMeter{}))
+	method := "structured"
+	conf := 95
+	bill := models.UtilityBill{
+		PropertyID: propertyID, UploadedBy: 1,
+		FileHash: "h" + strconv.Itoa(int(propertyID)) + "x" + strconv.Itoa(int(time.Now().UnixNano())),
+		FilePath: "bills/x.pdf", Currency: "CAD", PaymentStatus: "unpaid",
+		IngestionSource: "manual_upload", ExtractionStatus: "completed",
+		ExtractionMethod: &method, ExtractionConfidence: &conf,
+		TotalAmount:   123.45,
+		StatementDate: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		DueDate:       time.Date(2026, 4, 21, 0, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, db.Create(&bill).Error)
+	require.NoError(t, db.Create(&models.UtilityBillLineItem{
+		BillID: bill.ID, UtilityType: "electricity", Category: "energy",
+		Description: "Tier 1", Amount: 20.00,
+	}).Error)
+	require.NoError(t, db.Create(&models.UtilityBillMeter{
+		BillID: bill.ID, MeterType: "electric", MeterNumber: "E1",
+		Usage: 200, Multiplier: 40,
+	}).Error)
+	return bill
 }
 
 func TestBillHandler_Upload_Returns202AndEnqueues(t *testing.T) {
@@ -205,4 +233,74 @@ func TestBillHandler_Reextract_ManualEntry_400(t *testing.T) {
 		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"/reextract", nil)
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestBillHandler_List_FiltersByProperty(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	r.GET("/utility-bills", (&handlers.BillHandler{DB: db}).List)
+
+	prop2 := models.Property{Name: "Cottage", Address: "2", Provider: "powerstream", IsActive: true}
+	require.NoError(t, db.Create(&prop2).Error)
+
+	seedBillWithChildren(t, db, 1)
+	seedBillWithChildren(t, db, prop2.ID)
+	seedBillWithChildren(t, db, 1)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills?property_id=1", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var list []models.UtilityBill
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
+	require.Len(t, list, 2)
+}
+
+func TestBillHandler_List_FiltersByStatus(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	r.GET("/utility-bills", (&handlers.BillHandler{DB: db}).List)
+
+	_ = seedBillWithChildren(t, db, 1)
+	b2 := seedBillWithChildren(t, db, 1)
+	b2.ExtractionStatus = "needs_review"
+	require.NoError(t, db.Save(&b2).Error)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills?status=needs_review", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var list []models.UtilityBill
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+	require.Equal(t, "needs_review", list[0].ExtractionStatus)
+}
+
+func TestBillHandler_Get_ReturnsLineItemsAndMeters(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.GET("/utility-bills/:id", h.Get)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/"+strconv.Itoa(int(bill.ID)), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Bill      models.UtilityBill           `json:"bill"`
+		LineItems []models.UtilityBillLineItem `json:"line_items"`
+		Meters    []models.UtilityBillMeter    `json:"meters"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, bill.ID, resp.Bill.ID)
+	require.Len(t, resp.LineItems, 1)
+	require.Len(t, resp.Meters, 1)
+}
+
+func TestBillHandler_Get_404(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	r.GET("/utility-bills/:id", (&handlers.BillHandler{DB: db}).Get)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/999", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }

@@ -209,3 +209,50 @@ func (h *BillHandler) Reextract(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{"bill_id": bill.ID})
 }
+
+// GET /api/v1/utility-bills — optional filters: property_id, status, date_from, date_to.
+func (h *BillHandler) List(c *gin.Context) {
+	q := h.DB.WithContext(c.Request.Context()).Model(&models.UtilityBill{}).Order("statement_date desc, id desc")
+	if pid := c.Query("property_id"); pid != "" {
+		q = q.Where("property_id = ?", pid)
+	}
+	if status := c.Query("status"); status != "" {
+		q = q.Where("extraction_status = ?", status)
+	}
+	if from := c.Query("date_from"); from != "" {
+		if t, err := time.Parse("2006-01-02", from); err == nil {
+			q = q.Where("statement_date >= ?", t)
+		}
+	}
+	if to := c.Query("date_to"); to != "" {
+		if t, err := time.Parse("2006-01-02", to); err == nil {
+			q = q.Where("statement_date <= ?", t)
+		}
+	}
+
+	var billsOut []models.UtilityBill
+	if err := q.Find(&billsOut).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "list failed"})
+		return
+	}
+	c.JSON(http.StatusOK, billsOut)
+}
+
+// GET /api/v1/utility-bills/:id — bill + line items + meters.
+func (h *BillHandler) Get(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var bill models.UtilityBill
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+	var items []models.UtilityBillLineItem
+	var meters []models.UtilityBillMeter
+	h.DB.WithContext(c.Request.Context()).Where("bill_id = ?", bill.ID).Find(&items)
+	h.DB.WithContext(c.Request.Context()).Where("bill_id = ?", bill.ID).Find(&meters)
+	c.JSON(http.StatusOK, gin.H{"bill": bill, "line_items": items, "meters": meters})
+}
