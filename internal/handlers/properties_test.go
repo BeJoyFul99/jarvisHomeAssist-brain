@@ -58,6 +58,9 @@ func TestPropertyHandler_CreateListUpdateDelete(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var updated models.Property
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &updated))
+	require.Equal(t, "Cottage", updated.Name, "response body must reflect the update")
 
 	// Soft-delete
 	w = httptest.NewRecorder()

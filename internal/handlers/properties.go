@@ -45,7 +45,7 @@ func (h *PropertyHandler) Create(c *gin.Context) {
 		Name:          body.Name,
 		Address:       body.Address,
 		AccountNumber: body.AccountNumber,
-		Provider:      firstNonEmpty(body.Provider, "powerstream"),
+		Provider:      cond(body.Provider != "", body.Provider, "powerstream"),
 		RateClass:     body.RateClass,
 		IsActive:      true,
 	}
@@ -88,6 +88,11 @@ func (h *PropertyHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
 		return
 	}
+	// Reload to reflect updated fields in response.
+	if err := h.DB.WithContext(c.Request.Context()).First(&prop, prop.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload property"})
+		return
+	}
 	c.JSON(http.StatusOK, prop)
 }
 
@@ -111,11 +116,4 @@ func (h *PropertyHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
