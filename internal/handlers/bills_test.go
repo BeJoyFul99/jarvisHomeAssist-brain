@@ -187,3 +187,22 @@ func TestBillHandler_Reextract_404(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestBillHandler_Reextract_ManualEntry_400(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+
+	method := "manual"
+	bill := models.UtilityBill{
+		PropertyID: 1, UploadedBy: 1, FileHash: "m1",
+		Currency: "CAD", PaymentStatus: "unpaid",
+		IngestionSource: "manual_entry", ExtractionStatus: "completed",
+		ExtractionMethod: &method,
+	}
+	require.NoError(t, db.Create(&bill).Error)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost,
+		"/utility-bills/"+strconv.Itoa(int(bill.ID))+"/reextract", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
