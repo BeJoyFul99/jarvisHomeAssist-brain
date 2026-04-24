@@ -33,6 +33,12 @@ func (f *fakeStore) Put(_ uint, _ string, hash string, data []byte) (string, err
 func (f *fakeStore) Get(string) ([]byte, error) { return nil, nil }
 func (f *fakeStore) Delete(string) error         { return nil }
 
+type fakeStoreGet struct{ data []byte }
+
+func (f *fakeStoreGet) Put(uint, string, string, []byte) (string, error) { return "", nil }
+func (f *fakeStoreGet) Get(string) ([]byte, error)                       { return f.data, nil }
+func (f *fakeStoreGet) Delete(string) error                               { return nil }
+
 func newBillRouter(t *testing.T) (*gin.Engine, *gorm.DB, chan workers.ExtractionJob, *fakeStore, *handlers.BillHandler) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -411,4 +417,39 @@ func TestBillHandler_MarkPaid_Partial(t *testing.T) {
 	var reloaded models.UtilityBill
 	require.NoError(t, db.First(&reloaded, bill.ID).Error)
 	require.Equal(t, "partial", reloaded.PaymentStatus)
+}
+
+func TestBillHandler_DownloadPDF(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	storeWithGet := &fakeStoreGet{data: []byte("%PDF-1.4 test pdf content")}
+	h := &handlers.BillHandler{DB: db, Store: storeWithGet}
+	r.GET("/utility-bills/:id/pdf", h.DownloadPDF)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/"+strconv.Itoa(int(bill.ID))+"/pdf", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "application/pdf", w.Header().Get("Content-Type"))
+	require.Equal(t, "%PDF-1.4 test pdf content", w.Body.String())
+}
+
+func TestBillHandler_DownloadPDF_ManualEntry_404(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	h := &handlers.BillHandler{DB: db}
+	r.GET("/utility-bills/:id/pdf", h.DownloadPDF)
+
+	method := "manual"
+	b := models.UtilityBill{
+		PropertyID: 1, UploadedBy: 1, Currency: "CAD",
+		PaymentStatus: "unpaid", IngestionSource: "manual_entry",
+		ExtractionStatus: "completed", ExtractionMethod: &method,
+		FileHash: "manual-entry-" + strconv.Itoa(int(time.Now().UnixNano())),
+	}
+	require.NoError(t, db.Create(&b).Error)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/"+strconv.Itoa(int(b.ID))+"/pdf", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }

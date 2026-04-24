@@ -390,3 +390,27 @@ func (h *BillHandler) MarkPaid(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, bill)
 }
+
+// GET /api/v1/utility-bills/:id/pdf
+func (h *BillHandler) DownloadPDF(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var bill models.UtilityBill
+	if err := h.DB.WithContext(c.Request.Context()).First(&bill, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+		return
+	}
+	if bill.FilePath == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no PDF for this bill"})
+		return
+	}
+	data, err := h.Store.Get(bill.FilePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "read pdf"})
+		return
+	}
+	c.Data(http.StatusOK, "application/pdf", data)
+}
