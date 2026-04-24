@@ -1,0 +1,36 @@
+POWERSTREAM ENERGY SERVICES
+Statement Date: 2026-04-01
+Due Date: 2026-04-21
+Account Number: 987654321
+Service Address: 123 EXAMPLE AVE, MARKHAM ON
+
+Bill Type: REGULAR
+
+PREVIOUS BALANCE             $234.56
+PAYMENT -03-15              -$234.56
+BALANCE FORWARD                $0.00
+
+ELECTRICITY CHARGES
+Winter Tier 1     200 kWh @ $0.10345   $20.69
+Winter Tier 2      50 kWh @ $0.12436    $6.22
+Delivery                                $14.55
+Regulatory                               $1.03
+Ontario Electricity Rebate             -$2.70
+
+WATER CHARGES
+Usage              15 m3  @ $2.45      $36.75
+Delivery                                $8.20
+
+HVAC CHARGES
+Natural Gas         8 m3  @ $0.38       $3.04
+
+OTHER CHARGES
+Late Fee                                $5.00
+
+TOTAL CURRENT CHARGES                  $92.78
+Bill at a Glance                       $92.78
+
+METER READINGS
+Electric  E12345  Prev: 05000  Curr: 05250  Usage: 250 kWh  Multiplier: 40
+Water     W67890  Prev: 02000  Curr: 02015  Usage: 15 m3    Multiplier: 1
+HVAC      G11111  Prev: 01000  Curr: 01008  Usage: 8 m3     Multiplier: 1
