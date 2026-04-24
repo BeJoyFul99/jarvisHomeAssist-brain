@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
+	"jarvishomeassist-brain/internal/bills"
 	"jarvishomeassist-brain/internal/config"
 	"jarvishomeassist-brain/internal/database"
 	"jarvishomeassist-brain/internal/handlers"
@@ -168,6 +170,23 @@ func main() {
 	admin.POST("/properties", properties.Create)
 	admin.PATCH("/properties/:id", properties.Update)
 	admin.DELETE("/properties/:id", properties.Delete)
+
+	// ── Utility bills ────────────────────────────────────────
+	billJobs := make(chan workers.ExtractionJob, 64)
+	billStore := bills.NewDiskBillStore(cfg.UploadBaseDir)
+	extractor := &bills.Extractor{
+		ExtractText: bills.ExtractText,
+		Rasterize:   bills.Rasterize,
+		Vision:      bills.NewVisionClient(cfg.CFWorkerURL, cfg.CFWorkerSecret, 60*time.Second),
+	}
+	go workers.RunExtractionWorker(context.Background(), billJobs, db, billStore, extractor, eventHub, appLogger)
+
+	billHandler := &handlers.BillHandler{
+		DB: db, Store: billStore, Jobs: billJobs, Hub: eventHub, Log: appLogger,
+	}
+	admin.POST("/utility-bills/upload", billHandler.Upload)
+	admin.POST("/utility-bills", billHandler.ManualCreate)
+	admin.POST("/utility-bills/:id/reextract", billHandler.Reextract)
 
 	// ── Server logs (admin only) ────────────────────────────
 	logsHandler := &handlers.LogsHandler{Logger: appLogger}
