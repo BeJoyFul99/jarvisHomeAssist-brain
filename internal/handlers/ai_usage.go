@@ -237,32 +237,51 @@ func (h *AIUsageHandler) Config(c *gin.Context) {
 	c.JSON(resp.StatusCode, respData)
 }
 
-// Models proxies the worker's selectable model catalog.
+// builtinModelCatalog mirrors the worker's MODEL_CATALOG. Served as a fallback
+// so the Model Library works even before the worker exposes /v1/models. Keep in
+// sync with jarvishomeassist-ai/src/index.ts.
+func builtinModelCatalog() gin.H {
+	return gin.H{
+		"models": []gin.H{
+			{"id": "@cf/meta/llama-3.2-11b-vision-instruct", "name": "Llama 3.2 11B Vision", "capabilities": []string{"chat", "vision"}, "description": "Balanced multimodal default — fast chat with image understanding."},
+			{"id": "@cf/meta/llama-3.1-8b-instruct", "name": "Llama 3.1 8B", "capabilities": []string{"chat"}, "description": "Lightweight text-only chat; cheapest per token."},
+			{"id": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "name": "Llama 3.3 70B Fast", "capabilities": []string{"chat"}, "description": "Strongest text reasoning; higher neuron cost."},
+			{"id": "@cf/meta/llama-4-scout-17b-16e-instruct", "name": "Llama 4 Scout 17B", "capabilities": []string{"chat", "vision"}, "description": "Multimodal MoE; good balance of quality and cost."},
+			{"id": "@cf/google/gemma-3-12b-it", "name": "Gemma 3 12B", "capabilities": []string{"chat", "vision"}, "description": "Reliable structured-JSON extraction; bill-reading default."},
+			{"id": "@cf/mistralai/mistral-small-3.1-24b-instruct", "name": "Mistral Small 3.1 24B", "capabilities": []string{"chat", "vision"}, "description": "Strong multimodal generalist."},
+		},
+		"defaults": gin.H{
+			"chat":         "@cf/meta/llama-3.2-11b-vision-instruct",
+			"bill_extract": "@cf/google/gemma-3-12b-it",
+		},
+	}
+}
+
+// Models returns the selectable model catalog. It prefers the worker's live
+// /v1/models (authoritative defaults), falling back to the built-in list when
+// the worker is unset, unreachable, or hasn't exposed the endpoint yet.
 // GET /api/v1/admin/ai-models
 func (h *AIUsageHandler) Models(c *gin.Context) {
-	if h.Cfg.CFWorkerURL == "" {
-		c.JSON(http.StatusOK, gin.H{"error": "CF_WORKER_URL not configured", "models": []any{}})
-		return
+	if h.Cfg.CFWorkerURL != "" {
+		client := &http.Client{Timeout: 5 * time.Second}
+		if req, err := http.NewRequest("GET", h.Cfg.CFWorkerURL+"/v1/models", nil); err == nil {
+			if resp, err := client.Do(req); err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					body, _ := io.ReadAll(resp.Body)
+					var respData map[string]any
+					if json.Unmarshal(body, &respData) == nil {
+						if models, ok := respData["models"].([]any); ok && len(models) > 0 {
+							c.JSON(http.StatusOK, respData)
+							return
+						}
+					}
+				}
+			}
+		}
 	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", h.Cfg.CFWorkerURL+"/v1/models", nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "worker unreachable"})
-		return
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var respData interface{}
-	json.Unmarshal(body, &respData)
-	c.JSON(resp.StatusCode, respData)
+	// Fallback: built-in catalog (worker not deployed / unreachable).
+	c.JSON(http.StatusOK, builtinModelCatalog())
 }
 
 // toFloat safely converts interface{} to float64 (handles string numbers from CF API).
