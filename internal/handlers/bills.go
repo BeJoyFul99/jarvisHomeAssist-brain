@@ -81,27 +81,72 @@ func (h *BillHandler) Upload(c *gin.Context) {
 	sum := sha256.Sum256(data)
 	fileHash := hex.EncodeToString(sum[:])
 
+	// Dedup against ALL rows (including soft-deleted) because the UNIQUE
+	// index ux_bill_property_hash does not honor deleted_at.
 	var existing models.UtilityBill
-	if err := h.DB.Where("property_id = ? AND file_hash = ?", propertyID, fileHash).First(&existing).Error; err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "duplicate bill for this property", "bill_id": existing.ID})
-		return
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+	dupErr := h.DB.Unscoped().
+		Where("property_id = ? AND file_hash = ?", propertyID, fileHash).
+		First(&existing).Error
+
+	if dupErr != nil && !errors.Is(dupErr, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "dedup check"})
 		return
 	}
 
-	bill := models.UtilityBill{
-		PropertyID:       uint(propertyID),
-		UploadedBy:       uid,
-		FileHash:         fileHash,
-		Currency:         "CAD",
-		PaymentStatus:    "unpaid",
-		IngestionSource:  "manual_upload",
-		ExtractionStatus: "processing",
-	}
-	if err := h.DB.Create(&bill).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create bill"})
+	var bill models.UtilityBill
+	if dupErr == nil && !existing.DeletedAt.Valid {
+		// Live duplicate — reject.
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "duplicate bill for this property",
+			"bill_id": existing.ID,
+		})
 		return
+	}
+	if dupErr == nil && existing.DeletedAt.Valid {
+		// Re-uploading a previously-deleted bill: restore it, reset extraction,
+		// and wipe children so extraction can repopulate them cleanly.
+		bill = existing
+		if err := h.DB.Unscoped().Model(&bill).Updates(map[string]any{
+			"deleted_at":            nil,
+			"uploaded_by":           uid,
+			"extraction_status":     "processing",
+			"extraction_method":     nil,
+			"extraction_confidence": nil,
+			"extraction_error":      nil,
+			"raw_extracted_data":    nil,
+			"ingestion_source":      "manual_upload",
+		}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "restore bill"})
+			return
+		}
+		if err := h.DB.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillLineItem{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "wipe line items"})
+			return
+		}
+		if err := h.DB.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillMeter{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "wipe meters"})
+			return
+		}
+		// Reload with the cleared deleted_at so subsequent reads see the live row.
+		if err := h.DB.First(&bill, bill.ID).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "reload bill"})
+			return
+		}
+	} else {
+		// No prior row — normal create.
+		bill = models.UtilityBill{
+			PropertyID:       uint(propertyID),
+			UploadedBy:       uid,
+			FileHash:         fileHash,
+			Currency:         "CAD",
+			PaymentStatus:    "unpaid",
+			IngestionSource:  "manual_upload",
+			ExtractionStatus: "processing",
+		}
+		if err := h.DB.Create(&bill).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "create bill"})
+			return
+		}
 	}
 
 	period := bill.CreatedAt.Format("2006-01")

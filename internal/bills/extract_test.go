@@ -10,12 +10,14 @@ import (
 )
 
 type fakeVision struct {
-	result bills.ParsedBill
-	err    error
+	result     bills.ParsedBill
+	confidence int
+	model      string
+	err        error
 }
 
-func (f *fakeVision) Extract(ctx context.Context, pages [][]byte) (bills.ParsedBill, error) {
-	return f.result, f.err
+func (f *fakeVision) Extract(ctx context.Context, pages [][]byte) (bills.ParsedBill, int, string, error) {
+	return f.result, f.confidence, f.model, f.err
 }
 
 func goodVisionBill() bills.ParsedBill {
@@ -48,7 +50,7 @@ func TestExtract_LowConfidence_FallsBackToVision(t *testing.T) {
 	orch := &bills.Extractor{
 		ExtractText: func(_ []byte) (string, error) { return "garbage no fields", nil },
 		Rasterize:   func(_ []byte) ([][]byte, error) { return [][]byte{{0x89, 'P', 'N', 'G'}}, nil },
-		Vision:      &fakeVision{result: goodVisionBill()},
+		Vision:      &fakeVision{result: goodVisionBill(), confidence: 90},
 	}
 	res, err := orch.Extract(context.Background(), []byte("%PDF-1.4\n..."))
 	require.NoError(t, err)

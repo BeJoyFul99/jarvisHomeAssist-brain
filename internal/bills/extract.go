@@ -4,8 +4,9 @@ import "context"
 
 // VisionExtractor abstracts the vision fallback so the orchestrator can be tested
 // without hitting a real HTTP endpoint. *VisionClient satisfies this interface.
+// Returns (parsed bill, confidence 0-100, model handle, error).
 type VisionExtractor interface {
-	Extract(ctx context.Context, pages [][]byte) (ParsedBill, error)
+	Extract(ctx context.Context, pages [][]byte) (ParsedBill, int, string, error)
 }
 
 // Extractor orchestrates the full pipeline. Function-typed fields allow test stubs.
@@ -21,6 +22,7 @@ type ExtractResult struct {
 	Parsed     ParsedBill
 	Status     string // "completed" | "needs_review" | "failed"
 	Method     string // "structured" | "vision_fallback" | ""
+	Model      string // AI model handle for vision fallback, "" for structured
 	Confidence int
 	Error      string
 }
@@ -57,14 +59,20 @@ func (e *Extractor) visionPath(ctx context.Context, data []byte) (ExtractResult,
 	if e.Vision == nil {
 		return ExtractResult{Status: "needs_review", Error: "no vision client"}, nil
 	}
-	parsed, err := e.Vision.Extract(ctx, pages)
+	parsed, aiConf, model, err := e.Vision.Extract(ctx, pages)
 	if err != nil {
-		return ExtractResult{Status: "needs_review", Error: "vision: " + err.Error()}, nil
+		return ExtractResult{Status: "needs_review", Error: "vision: " + err.Error(), Model: model}, nil
 	}
-	score := ScoreConfidence(parsed)
+	// Trust the AI's self-reported confidence when it looks reasonable,
+	// but fall back to ScoreConfidence if the model returned 0 yet still
+	// produced fields (defensive).
+	score := aiConf
+	if score <= 0 {
+		score = ScoreConfidence(parsed)
+	}
 	status := "completed"
 	if score < 70 {
 		status = "needs_review"
 	}
-	return ExtractResult{Parsed: parsed, Status: status, Method: "vision_fallback", Confidence: score}, nil
+	return ExtractResult{Parsed: parsed, Status: status, Method: "vision_fallback", Model: model, Confidence: score}, nil
 }

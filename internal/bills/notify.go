@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"jarvishomeassist-brain/internal/models"
 )
@@ -14,24 +15,28 @@ type NotificationKey struct {
 	PropertyID uint
 	BillID     *uint
 	Trigger    string
-	PeriodKey  string // "YYYY-MM"
+	PeriodKey  string // "YYYY-MM" for month-scoped triggers, "bill-<id>" for per-bill.
 }
 
-// TryInsertNotification returns (true, nil) on success, (false, nil) when UNIQUE
-// blocks the insert, (false, err) for any other failure.
+// TryInsertNotification returns (true, nil) when a new row was actually written,
+// (false, nil) when the dedup tuple already exists, (false, err) on any other
+// failure. Uses ON CONFLICT DO NOTHING so the driver does not log a UNIQUE
+// violation at ERROR level when re-extracting an already-notified bill.
 func TryInsertNotification(db *gorm.DB, key NotificationKey) (bool, error) {
 	row := models.UtilityBillNotification{
 		PropertyID: key.PropertyID, BillID: key.BillID,
 		Trigger: key.Trigger, PeriodKey: key.PeriodKey,
 	}
-	err := db.Create(&row).Error
-	if err == nil {
-		return true, nil
+	res := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+	if res.Error != nil {
+		// Fallback: some driver combos may still surface a UNIQUE violation
+		// even with OnConflict — treat those as silent skips.
+		if isUniqueViolation(res.Error) {
+			return false, nil
+		}
+		return false, res.Error
 	}
-	if isUniqueViolation(err) {
-		return false, nil
-	}
-	return false, err
+	return res.RowsAffected > 0, nil
 }
 
 func isUniqueViolation(err error) bool {

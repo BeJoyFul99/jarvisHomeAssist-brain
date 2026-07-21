@@ -82,6 +82,12 @@ func runOne(
 		bill.ExtractionMethod = &res.Method
 		bill.ExtractionConfidence = &res.Confidence
 		bill.ExtractionError = nil
+		if res.Model != "" {
+			m := res.Model
+			bill.ExtractionModel = &m
+		} else {
+			bill.ExtractionModel = nil
+		}
 		if !res.Parsed.StatementDate.IsZero() {
 			bill.StatementDate = res.Parsed.StatementDate
 		}
@@ -155,20 +161,28 @@ func runOne(
 
 func evaluateAndFire(db *gorm.DB, hub *sse.Hub, bill *models.UtilityBill) {
 	var budget models.EnergyBudget
-	db.Where("property_id = ? AND month = ? AND year = ?",
-		bill.PropertyID,
-		int(bill.StatementDate.Month()),
-		bill.StatementDate.Year(),
-	).First(&budget)
+	var proj bills.Projection
 
-	proj, _ := bills.ProjectCost(db, bill.PropertyID, int(bill.StatementDate.Month()), bill.StatementDate.Year())
+	// Only look up the monthly budget/projection when we have a real statement
+	// date — otherwise we would query month=1/year=1 and GORM would log
+	// "record not found" noise. Without a date, budget-related triggers are
+	// silently skipped by EvaluateTriggers (BudgetAmount == 0 guard).
+	if !bill.StatementDate.IsZero() {
+		month := int(bill.StatementDate.Month())
+		year := bill.StatementDate.Year()
+		// Find() instead of First() so a missing row does not log as an error.
+		db.Where("property_id = ? AND month = ? AND year = ?",
+			bill.PropertyID, month, year,
+		).Limit(1).Find(&budget)
+		proj, _ = bills.ProjectCost(db, bill.PropertyID, month, year)
+	}
+
 	triggers := bills.EvaluateTriggers(*bill, budget, proj, time.Now().UTC())
-	period := bills.PeriodKey(*bill)
 
 	for _, tr := range triggers {
 		inserted, _ := bills.TryInsertNotification(db, bills.NotificationKey{
 			PropertyID: bill.PropertyID, BillID: &bill.ID,
-			Trigger: tr.Name, PeriodKey: period,
+			Trigger: tr.Name, PeriodKey: bills.PeriodKey(*bill, tr.Name),
 		})
 		if inserted {
 			hub.Broadcast(sse.Event{

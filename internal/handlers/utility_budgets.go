@@ -92,10 +92,12 @@ func (h *UtilityBudgetHandler) Pace(c *gin.Context) {
 	month, _ := strconv.Atoi(c.DefaultQuery("month", strconv.Itoa(int(time.Now().Month()))))
 	year, _ := strconv.Atoi(c.DefaultQuery("year", strconv.Itoa(time.Now().Year())))
 
+	// Find() instead of First() — a month without a budget is expected and
+	// should not be logged as an error by GORM.
 	var budget models.EnergyBudget
 	h.DB.WithContext(c.Request.Context()).
 		Where("property_id = ? AND month = ? AND year = ?", pid, month, year).
-		First(&budget)
+		Limit(1).Find(&budget)
 
 	proj, err := bills.ProjectCost(h.DB.WithContext(c.Request.Context()), uint(pid), month, year)
 	if err != nil {

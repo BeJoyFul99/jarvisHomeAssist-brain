@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -41,10 +42,34 @@ func (h *PropertyHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	normAddr := strings.ToLower(strings.TrimSpace(body.Address))
+	if normAddr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "address cannot be empty"})
+		return
+	}
+
+	// Reject duplicates: an active property at the same (normalized) address already exists.
+	var existing models.Property
+	dupErr := h.DB.WithContext(c.Request.Context()).
+		Where("is_active = ? AND LOWER(TRIM(address)) = ?", true, normAddr).
+		First(&existing).Error
+	if dupErr == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "duplicate_address",
+			"message": "A property at this address already exists.",
+		})
+		return
+	}
+	if dupErr != gorm.ErrRecordNotFound {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check for duplicates"})
+		return
+	}
+
 	prop := models.Property{
-		Name:          body.Name,
-		Address:       body.Address,
-		AccountNumber: body.AccountNumber,
+		Name:          strings.TrimSpace(body.Name),
+		Address:       strings.TrimSpace(body.Address),
+		AccountNumber: strings.TrimSpace(body.AccountNumber),
 		Provider:      cond(body.Provider != "", body.Provider, "powerstream"),
 		RateClass:     body.RateClass,
 		IsActive:      true,

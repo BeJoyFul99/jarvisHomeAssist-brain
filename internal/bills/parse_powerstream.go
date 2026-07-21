@@ -64,19 +64,29 @@ func (p ParsedBill) LineItemsByType(t string) []ParsedLineItem {
 }
 
 var (
-	reAccount   = regexp.MustCompile(`(?im)^Account Number:\s*(\S+)`)
-	reAddress   = regexp.MustCompile(`(?im)^Service Address:\s*(.+)$`)
-	reStatement = regexp.MustCompile(`(?im)^Statement Date:\s*(\d{4}-\d{2}-\d{2})`)
-	reDue       = regexp.MustCompile(`(?im)^Due Date:\s*(\d{4}-\d{2}-\d{2})`)
-	reBillType  = regexp.MustCompile(`(?im)^Bill Type:\s*(\S+)`)
-	reTotal     = regexp.MustCompile(`(?im)^TOTAL CURRENT CHARGES\s+\$?([-\d.,]+)`)
-	rePrevBal   = regexp.MustCompile(`(?im)^PREVIOUS BALANCE\s+\$?([-\d.,]+)`)
-	rePayment   = regexp.MustCompile(`(?im)^PAYMENT\s+[-\d/]+\s+-\$?([-\d.,]+)`)
-	reBalFwd    = regexp.MustCompile(`(?im)^BALANCE FORWARD\s+\$?([-\d.,]+)`)
-	reLateFee   = regexp.MustCompile(`(?im)^Late Fee\s+\$?([-\d.,]+)`)
+	reAccount = regexp.MustCompile(`(?i)Account Number:\s*(\S+)`)
+	reAddress = regexp.MustCompile(`(?im)Service Address:\s*(.+?)(?:\s{2,}|$)`)
+	// Dates: accept either ISO (synthetic fixtures) or "Month D, YYYY" (real PowerStream bills).
+	reStatementISO  = regexp.MustCompile(`(?i)Statement Date:\s*(\d{4}-\d{2}-\d{2})`)
+	reStatementLong = regexp.MustCompile(`(?i)Statement Date:\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4})`)
+	reDueISO        = regexp.MustCompile(`(?i)Due Date:\s*(\d{4}-\d{2}-\d{2})`)
+	reDueLong       = regexp.MustCompile(`(?i)Due Date:\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4})`)
+	reBillType      = regexp.MustCompile(`(?i)Bill Type:\s*(\S+)`)
+	// Total: prefer the printed "Bill at a Glance" value (real bills) and fall back
+	// to TOTAL CURRENT CHARGES (fixtures).
+	reTotalGlance = regexp.MustCompile(`(?is)Bill at a Glance\s*\$?\s*([\d.,]+)`)
+	reTotalLong   = regexp.MustCompile(`(?im)^TOTAL CURRENT CHARGES\s+\$?([-\d.,]+)`)
+	rePrevBal     = regexp.MustCompile(`(?im)PREVIOUS BALANCE\s+\$?([-\d.,]+)`)
+	rePayment     = regexp.MustCompile(`(?im)^PAYMENT\s+[-/\d]+\s+-\$?([-\d.,]+)`)
+	reBalFwd      = regexp.MustCompile(`(?im)BALANCE FORWARD\s+-?\$?([-\d.,]+)`)
+	reLateFee     = regexp.MustCompile(`(?im)Late Fee\s+\$?([-\d.,]+)`)
 	// Line item: description, optional "<n> kWh|m3", optional "@ $<rate>", sign, amount.
 	reLineItem = regexp.MustCompile(`(?m)^\s*(.+?)\s+(\d+\s+(?:kWh|m3))?\s*(?:@\s*\$?([\d.]+))?\s+(-?)\$?([\d.,]+)\s*$`)
-	reMeter    = regexp.MustCompile(`(?im)^(Electric|Water|HVAC)\s+(\S+)\s+Prev:\s*(\S+)\s+Curr:\s*(\S+)\s+Usage:\s*([\d.]+)\s+(\w+)\s+Multiplier:\s*(\d+)`)
+	// Two meter layouts: fixture (Prev:/Curr:/Usage:/Multiplier:) and real (NUM CURR/DATE PREV/DATE MULT).
+	reMeterFixture = regexp.MustCompile(`(?im)^(Electric|Water|HVAC)\s+(\S+)\s+Prev:\s*(\S+)\s+Curr:\s*(\S+)\s+Usage:\s*([\d.]+)\s+(\w+)\s+Multiplier:\s*(\d+)`)
+	reMeterReal    = regexp.MustCompile(
+		`(?im)^(Electric|Water|HVAC)\s+Meter\s+(\S+)\s+(\S+)\s*/\s*([A-Z][a-z]+\s+\d{1,2},\s*\d{4})\s+(\S+)\s*/\s*([A-Z][a-z]+\s+\d{1,2},\s*\d{4})\s+(\d+)`,
+	)
 )
 
 // ParsePowerStream applies template regexes to raw bill text and returns a
@@ -91,21 +101,20 @@ func ParsePowerStream(text string) (ParsedBill, error) {
 	if m := reAddress.FindStringSubmatch(text); len(m) == 2 {
 		p.ServiceAddress = strings.TrimSpace(m[1])
 	}
-	if m := reStatement.FindStringSubmatch(text); len(m) == 2 {
-		if t, err := time.Parse("2006-01-02", m[1]); err == nil {
-			p.StatementDate = t
-		}
-	}
-	if m := reDue.FindStringSubmatch(text); len(m) == 2 {
-		if t, err := time.Parse("2006-01-02", m[1]); err == nil {
-			p.DueDate = t
-		}
-	}
+	p.StatementDate = firstParseableDate(text, reStatementISO, reStatementLong)
+	p.DueDate = firstParseableDate(text, reDueISO, reDueLong)
 	if m := reBillType.FindStringSubmatch(text); len(m) == 2 {
 		p.BillType = strings.TrimSpace(m[1])
 	}
-	if m := reTotal.FindStringSubmatch(text); len(m) == 2 {
+	// Total: try the "Bill at a Glance" figure first (what real bills print),
+	// then fall back to the synthetic "TOTAL CURRENT CHARGES" line.
+	if m := reTotalGlance.FindStringSubmatch(text); len(m) == 2 {
 		p.TotalAmount = parseAmount(m[1])
+	}
+	if p.TotalAmount == 0 {
+		if m := reTotalLong.FindStringSubmatch(text); len(m) == 2 {
+			p.TotalAmount = parseAmount(m[1])
+		}
 	}
 	if m := rePrevBal.FindStringSubmatch(text); len(m) == 2 {
 		p.PreviousBalance = parseAmount(m[1])
@@ -123,6 +132,26 @@ func ParsePowerStream(text string) (ParsedBill, error) {
 	p.LineItems = parseLineItems(text)
 	p.Meters = parseMeters(text)
 	return p, nil
+}
+
+// firstParseableDate walks the supplied regexes in order and returns the first
+// match that time.Parse can decode in either ISO ("2006-01-02") or long
+// ("January 2, 2006") form. Returns zero time.Time when nothing matches.
+func firstParseableDate(text string, patterns ...*regexp.Regexp) time.Time {
+	layouts := []string{"2006-01-02", "January 2, 2006"}
+	for _, re := range patterns {
+		m := re.FindStringSubmatch(text)
+		if len(m) != 2 {
+			continue
+		}
+		raw := strings.TrimSpace(m[1])
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, raw); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 func parseAmount(s string) float64 {
@@ -225,7 +254,32 @@ func classifyCategory(desc, section string) string {
 
 func parseMeters(text string) []ParsedMeter {
 	var meters []ParsedMeter
-	for _, m := range reMeter.FindAllStringSubmatch(text, -1) {
+
+	// Real PowerStream layout: "Electric Meter NUM CURR / Mar 16, 2026  PREV / Feb 16, 2026  MULT"
+	for _, m := range reMeterReal.FindAllStringSubmatch(text, -1) {
+		if len(m) != 8 {
+			continue
+		}
+		mult, _ := strconv.Atoi(m[7])
+		currReading := m[3]
+		currDate, _ := time.Parse("January 2, 2006", expandMonth(m[4]))
+		prevReading := m[5]
+		prevDate, _ := time.Parse("January 2, 2006", expandMonth(m[6]))
+		usage := numericDelta(currReading, prevReading) * float64(max(mult, 1))
+		meters = append(meters, ParsedMeter{
+			MeterType:        strings.ToLower(m[1]),
+			MeterNumber:      m[2],
+			PreviousReading:  prevReading,
+			PreviousReadDate: prevDate,
+			CurrentReading:   currReading,
+			CurrentReadDate:  currDate,
+			Usage:            usage,
+			Multiplier:       mult,
+		})
+	}
+
+	// Synthetic fixture layout: "Electric E12345 Prev: X Curr: Y Usage: Z kWh Multiplier: N"
+	for _, m := range reMeterFixture.FindAllStringSubmatch(text, -1) {
 		if len(m) != 8 {
 			continue
 		}
@@ -241,4 +295,33 @@ func parseMeters(text string) []ParsedMeter {
 		})
 	}
 	return meters
+}
+
+// expandMonth turns a 3-letter abbreviation ("Mar") into the full month name
+// ("March") so time.Parse with "January 2, 2006" succeeds on both.
+func expandMonth(s string) string {
+	abbr := map[string]string{
+		"Jan": "January", "Feb": "February", "Mar": "March", "Apr": "April",
+		"May": "May", "Jun": "June", "Jul": "July", "Aug": "August",
+		"Sep": "September", "Oct": "October", "Nov": "November", "Dec": "December",
+	}
+	parts := strings.SplitN(s, " ", 2)
+	if len(parts) == 2 {
+		if full, ok := abbr[parts[0]]; ok {
+			return full + " " + parts[1]
+		}
+	}
+	return s
+}
+
+func numericDelta(a, b string) float64 {
+	strip := func(s string) float64 {
+		cleaned := strings.TrimLeft(s, "0")
+		if cleaned == "" {
+			return 0
+		}
+		v, _ := strconv.ParseFloat(cleaned, 64)
+		return v
+	}
+	return strip(a) - strip(b)
 }

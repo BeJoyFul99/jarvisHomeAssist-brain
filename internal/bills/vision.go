@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// VisionClient calls the Cloudflare Worker AI endpoint with rasterized PDF
-// pages and asks it to return structured bill JSON. Spec §3.3.
+// VisionClient calls the Cloudflare Worker's /v1/bills/extract endpoint with
+// rasterized PDF pages and receives a structured bill + model-self-reported
+// confidence. Spec §3.3.
 type VisionClient struct {
 	workerURL string
 	secret    string
@@ -28,85 +29,10 @@ func NewVisionClient(workerURL, secret string, timeout time.Duration) *VisionCli
 	}
 }
 
-const visionSystemPrompt = `You are a utility-bill extraction assistant. The attached images are pages of a PowerStream Energy Services bill (electricity, water, HVAC). Return ONLY a JSON object with these top-level keys and no prose:
-{
-  "account_number": string, "service_address": string,
-  "statement_date": "YYYY-MM-DD", "due_date": "YYYY-MM-DD",
-  "billing_period_start": "YYYY-MM-DD", "billing_period_end": "YYYY-MM-DD",
-  "bill_type": "REGULAR" | "ESTIMATED" | "FINAL",
-  "total_amount": number, "previous_balance": number, "payments_received": number,
-  "balance_forward": number, "late_fees": number, "currency": "CAD",
-  "line_items": [{"utility_type": "electricity"|"water"|"hvac"|"other",
-                  "category": "energy"|"delivery"|"regulatory"|"hst"|"rebate"|"late_fee"|"debt_retirement",
-                  "description": string, "usage_amount": number|null, "usage_unit": string|null,
-                  "rate": number|null, "amount": number}],
-  "meters": [{"meter_type": "electric"|"water"|"hvac", "meter_number": string,
-              "previous_reading": string, "current_reading": string,
-              "usage": number, "multiplier": number}]
-}
-If a field is unknown, omit it. Do not invent data.`
-
-// Extract posts page images to the worker and parses the JSON response.
-func (c *VisionClient) Extract(ctx context.Context, pages [][]byte) (ParsedBill, error) {
-	if len(pages) == 0 {
-		return ParsedBill{}, errors.New("no pages to extract")
-	}
-	type imagePart struct {
-		Type     string `json:"type"`
-		ImageURL struct {
-			URL string `json:"url"`
-		} `json:"image_url"`
-	}
-	type textPart struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	type message struct {
-		Role    string `json:"role"`
-		Content any    `json:"content"`
-	}
-	parts := make([]any, 0, len(pages)+1)
-	parts = append(parts, textPart{Type: "text", Text: "Extract the bill into JSON per the system prompt."})
-	for _, png := range pages {
-		img := imagePart{Type: "image_url"}
-		img.ImageURL.URL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
-		parts = append(parts, img)
-	}
-	body := map[string]any{
-		"messages": []message{
-			{Role: "system", Content: visionSystemPrompt},
-			{Role: "user", Content: parts},
-		},
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return ParsedBill{}, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.workerURL+"/v1/chat", bytes.NewReader(raw))
-	if err != nil {
-		return ParsedBill{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return ParsedBill{}, fmt.Errorf("vision request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return ParsedBill{}, fmt.Errorf("vision worker returned %d", resp.StatusCode)
-	}
-
-	var wrapper struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
-		return ParsedBill{}, fmt.Errorf("decode wrapper: %w", err)
-	}
-
-	var raw2 struct {
+// visionResponse matches the shape returned by POST /v1/bills/extract.
+type visionResponse struct {
+	Model string `json:"model"`
+	Data  struct {
 		AccountNumber      string  `json:"account_number"`
 		ServiceAddress     string  `json:"service_address"`
 		StatementDate      string  `json:"statement_date"`
@@ -130,47 +56,97 @@ func (c *VisionClient) Extract(ctx context.Context, pages [][]byte) (ParsedBill,
 			Amount      float64  `json:"amount"`
 		} `json:"line_items"`
 		Meters []struct {
-			MeterType       string  `json:"meter_type"`
-			MeterNumber     string  `json:"meter_number"`
-			PreviousReading string  `json:"previous_reading"`
-			CurrentReading  string  `json:"current_reading"`
-			Usage           float64 `json:"usage"`
-			Multiplier      int     `json:"multiplier"`
+			MeterType        string  `json:"meter_type"`
+			MeterNumber      string  `json:"meter_number"`
+			PreviousReading  string  `json:"previous_reading"`
+			PreviousReadDate string  `json:"previous_read_date"`
+			CurrentReading   string  `json:"current_reading"`
+			CurrentReadDate  string  `json:"current_read_date"`
+			Usage            float64 `json:"usage"`
+			Multiplier       int     `json:"multiplier"`
 		} `json:"meters"`
+	} `json:"data"`
+	Confidence int    `json:"confidence"`
+	Notes      string `json:"notes"`
+}
+
+// Extract posts page images to the worker's dedicated bill-extract endpoint
+// and decodes the structured response. Returns (parsed bill, AI-reported
+// confidence 0-100, model handle, error).
+func (c *VisionClient) Extract(ctx context.Context, pages [][]byte) (ParsedBill, int, string, error) {
+	if len(pages) == 0 {
+		return ParsedBill{}, 0, "", errors.New("no pages to extract")
 	}
-	if err := json.Unmarshal([]byte(wrapper.Content), &raw2); err != nil {
-		return ParsedBill{}, fmt.Errorf("vision json: %w", err)
+
+	b64pages := make([]string, len(pages))
+	for i, png := range pages {
+		b64pages[i] = base64.StdEncoding.EncodeToString(png)
 	}
-	pb := ParsedBill{
-		AccountNumber:    raw2.AccountNumber,
-		ServiceAddress:   raw2.ServiceAddress,
-		BillType:         raw2.BillType,
-		TotalAmount:      raw2.TotalAmount,
-		PreviousBalance:  raw2.PreviousBalance,
-		PaymentsReceived: raw2.PaymentsReceived,
-		BalanceForward:   raw2.BalanceForward,
-		LateFees:         raw2.LateFees,
-		Currency:         firstOr(raw2.Currency, "CAD"),
+	body := map[string]any{"pages": b64pages, "tags": []string{"bill_extract"}}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return ParsedBill{}, 0, "", err
 	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.workerURL+"/v1/bills/extract", bytes.NewReader(raw))
+	if err != nil {
+		return ParsedBill{}, 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.secret)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ParsedBill{}, 0, "", fmt.Errorf("vision request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := readAllLimited(resp.Body, 4096)
+		// Try to surface the model from the response header even on error.
+		model := resp.Header.Get("X-AI-Model")
+		return ParsedBill{}, 0, model, fmt.Errorf("vision worker returned %d: %s", resp.StatusCode, string(b))
+	}
+
+	var vr visionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&vr); err != nil {
+		return ParsedBill{}, 0, "", fmt.Errorf("decode response: %w", err)
+	}
+
 	parseDate := func(s string) time.Time { t, _ := time.Parse("2006-01-02", s); return t }
-	pb.StatementDate = parseDate(raw2.StatementDate)
-	pb.DueDate = parseDate(raw2.DueDate)
-	pb.BillingPeriodStart = parseDate(raw2.BillingPeriodStart)
-	pb.BillingPeriodEnd = parseDate(raw2.BillingPeriodEnd)
-	for _, li := range raw2.LineItems {
+	pb := ParsedBill{
+		AccountNumber:      vr.Data.AccountNumber,
+		ServiceAddress:     vr.Data.ServiceAddress,
+		StatementDate:      parseDate(vr.Data.StatementDate),
+		DueDate:            parseDate(vr.Data.DueDate),
+		BillingPeriodStart: parseDate(vr.Data.BillingPeriodStart),
+		BillingPeriodEnd:   parseDate(vr.Data.BillingPeriodEnd),
+		BillType:           vr.Data.BillType,
+		TotalAmount:        vr.Data.TotalAmount,
+		PreviousBalance:    vr.Data.PreviousBalance,
+		PaymentsReceived:   vr.Data.PaymentsReceived,
+		BalanceForward:     vr.Data.BalanceForward,
+		LateFees:           vr.Data.LateFees,
+		Currency:           firstOr(vr.Data.Currency, "CAD"),
+	}
+	for _, li := range vr.Data.LineItems {
 		pb.LineItems = append(pb.LineItems, ParsedLineItem{
 			UtilityType: li.UtilityType, Category: li.Category, Description: li.Description,
 			UsageAmount: li.UsageAmount, UsageUnit: li.UsageUnit, Rate: li.Rate, Amount: li.Amount,
 		})
 	}
-	for _, m := range raw2.Meters {
+	for _, m := range vr.Data.Meters {
 		pb.Meters = append(pb.Meters, ParsedMeter{
-			MeterType: m.MeterType, MeterNumber: m.MeterNumber,
-			PreviousReading: m.PreviousReading, CurrentReading: m.CurrentReading,
-			Usage: m.Usage, Multiplier: m.Multiplier,
+			MeterType:        m.MeterType,
+			MeterNumber:      m.MeterNumber,
+			PreviousReading:  m.PreviousReading,
+			PreviousReadDate: parseDate(m.PreviousReadDate),
+			CurrentReading:   m.CurrentReading,
+			CurrentReadDate:  parseDate(m.CurrentReadDate),
+			Usage:            m.Usage,
+			Multiplier:       m.Multiplier,
 		})
 	}
-	return pb, nil
+	return pb, vr.Confidence, vr.Model, nil
 }
 
 func firstOr(s, fallback string) string {
@@ -178,4 +154,13 @@ func firstOr(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func readAllLimited(r interface{ Read(p []byte) (int, error) }, max int) ([]byte, error) {
+	buf := make([]byte, max)
+	n, err := r.Read(buf)
+	if err != nil && n == 0 {
+		return nil, err
+	}
+	return buf[:n], nil
 }

@@ -31,6 +31,7 @@ type UtilityBill struct {
 	IngestionSource      string         `gorm:"size:16;not null;default:manual_upload" json:"ingestion_source"`
 	ExtractionStatus     string         `gorm:"size:16;not null;default:processing;index:idx_bill_extraction_status" json:"extraction_status"`
 	ExtractionMethod     *string        `gorm:"size:16" json:"extraction_method"`
+	ExtractionModel      *string        `gorm:"size:64" json:"extraction_model"`
 	ExtractionConfidence *int           `json:"extraction_confidence"`
 	ExtractionError      *string        `gorm:"size:512" json:"extraction_error"`
 	RawExtractedData     datatypes.JSON `gorm:"type:jsonb" json:"raw_extracted_data"`

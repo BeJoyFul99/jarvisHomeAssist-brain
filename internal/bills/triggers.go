@@ -1,6 +1,7 @@
 package bills
 
 import (
+	"fmt"
 	"time"
 
 	"jarvishomeassist-brain/internal/models"
@@ -43,10 +44,18 @@ func EvaluateTriggers(bill models.UtilityBill, budget models.EnergyBudget, proj 
 	return out
 }
 
-// PeriodKey returns the "YYYY-MM" dedup key for a bill's statement month.
-func PeriodKey(bill models.UtilityBill) string {
-	if bill.StatementDate.IsZero() {
-		return ""
+// PeriodKey returns the dedup key for (bill, trigger). Month-scoped triggers
+// dedup once per property-month (so a second bill in the same month does not
+// re-fire a budget warning). Bill-scoped triggers dedup per bill so every
+// imported bill gets its own notification regardless of statement date.
+func PeriodKey(bill models.UtilityBill, trigger string) string {
+	switch trigger {
+	case "budget_warning", "budget_exceeded":
+		if !bill.StatementDate.IsZero() {
+			return bill.StatementDate.Format("2006-01")
+		}
+		// Fall back to bill-scope when statement date is missing so we do not
+		// collapse unrelated bills onto a single empty key.
 	}
-	return bill.StatementDate.Format("2006-01")
+	return fmt.Sprintf("bill-%d", bill.ID)
 }
