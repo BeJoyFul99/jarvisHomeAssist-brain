@@ -1094,11 +1094,16 @@ func (h *ChatHandler) triggerAIResponse(roomID uint, triggerMsgID uint) {
 		messages = append([]aiMsg{{Role: "system", Content: utilityCtx}}, messages...)
 	}
 
-	// Call Cloudflare Worker
-	reqBody, _ := json.Marshal(map[string]interface{}{
+	// Call Cloudflare Worker — model comes from the admin-selected setting;
+	// empty value lets the worker use its default.
+	chatReq := map[string]interface{}{
 		"messages": messages,
 		"stream":   true,
-	})
+	}
+	if m := GetSetting(h.DB, "ai_chat_model", ""); m != "" {
+		chatReq["model"] = m
+	}
+	reqBody, _ := json.Marshal(chatReq)
 
 	// Broadcast "responding" status
 	h.WSHub.BroadcastToRoom(roomID, ws.Message{

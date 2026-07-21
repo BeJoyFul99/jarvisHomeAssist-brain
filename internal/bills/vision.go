@@ -18,6 +18,9 @@ type VisionClient struct {
 	workerURL string
 	secret    string
 	http      *http.Client
+	// ModelProvider, when set, supplies the admin-selected extraction model
+	// per request (read from settings). Empty string = worker default.
+	ModelProvider func() string
 }
 
 // NewVisionClient is wired with cfg.CFWorkerURL + cfg.CFWorkerSecret at runtime.
@@ -83,6 +86,11 @@ func (c *VisionClient) Extract(ctx context.Context, pages [][]byte) (ParsedBill,
 		b64pages[i] = base64.StdEncoding.EncodeToString(png)
 	}
 	body := map[string]any{"pages": b64pages, "tags": []string{"bill_extract"}}
+	if c.ModelProvider != nil {
+		if m := c.ModelProvider(); m != "" {
+			body["model"] = m
+		}
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return ParsedBill{}, 0, "", err

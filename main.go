@@ -220,6 +220,8 @@ func main() {
 	admin.GET("/ai-usage/errors", aiUsage.Errors)
 	admin.GET("/ai-usage/today", aiUsage.Today)
 	admin.GET("/ai-usage/config", aiUsage.Config)
+	admin.GET("/ai-models", aiUsage.Models)
+	admin.GET("/ai-models", aiUsage.Models)
 
 	// ── Chat (real-time messaging + AI) ─────────────────────
 	wsHub := ws.NewHub(appLogger)

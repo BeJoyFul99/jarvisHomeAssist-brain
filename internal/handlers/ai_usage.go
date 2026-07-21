@@ -237,6 +237,34 @@ func (h *AIUsageHandler) Config(c *gin.Context) {
 	c.JSON(resp.StatusCode, respData)
 }
 
+// Models proxies the worker's selectable model catalog.
+// GET /api/v1/admin/ai-models
+func (h *AIUsageHandler) Models(c *gin.Context) {
+	if h.Cfg.CFWorkerURL == "" {
+		c.JSON(http.StatusOK, gin.H{"error": "CF_WORKER_URL not configured", "models": []any{}})
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", h.Cfg.CFWorkerURL+"/v1/models", nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "worker unreachable"})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var respData interface{}
+	json.Unmarshal(body, &respData)
+	c.JSON(resp.StatusCode, respData)
+}
+
 // toFloat safely converts interface{} to float64 (handles string numbers from CF API).
 func toFloat(v interface{}) float64 {
 	switch val := v.(type) {
