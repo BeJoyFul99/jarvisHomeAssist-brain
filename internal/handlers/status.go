@@ -155,6 +155,7 @@ func collectStatus() (gin.H, error) {
 	listeningSet := map[uint32]bool{}
 	listeningPorts := []gin.H{}
 	inboundConns := []gin.H{}
+	sshSessions := []string{}
 	activeConnCount := 0
 	if err == nil {
 		// First pass: collect the set of ports we listen on (dedup IPv4/IPv6).
@@ -173,23 +174,31 @@ func collectStatus() (gin.H, error) {
 			}
 		}
 		// Second pass: established connections TO one of our listening ports
-		// are inbound — someone connected to the server.
+		// from a NON-loopback remote are inbound — a real device connected to
+		// the server. Loopback (127.0.0.1/::1) is local dev-process noise.
 		for _, conn := range connections {
 			if conn.Status != "ESTABLISHED" {
 				continue
 			}
+			if !listeningSet[conn.Laddr.Port] || conn.Raddr.IP == "" {
+				continue
+			}
+			if conn.Raddr.IP == "127.0.0.1" || conn.Raddr.IP == "::1" {
+				continue
+			}
 			activeConnCount++
-			if listeningSet[conn.Laddr.Port] && conn.Raddr.IP != "" {
-				if len(inboundConns) < 20 {
-					inboundConns = append(inboundConns, gin.H{
-						"ip":         conn.Raddr.IP,
-						"remote":     fmt.Sprintf("%s:%d", conn.Raddr.IP, conn.Raddr.Port),
-						"local_port": conn.Laddr.Port,
-						"service":    serviceName(conn.Laddr.Port),
-						"timestamp":  time.Now().UTC().Format(time.RFC3339),
-						"success":    true,
-					})
-				}
+			if conn.Laddr.Port == 22 {
+				sshSessions = append(sshSessions, conn.Raddr.IP)
+			}
+			if len(inboundConns) < 20 {
+				inboundConns = append(inboundConns, gin.H{
+					"ip":         conn.Raddr.IP,
+					"remote":     fmt.Sprintf("%s:%d", conn.Raddr.IP, conn.Raddr.Port),
+					"local_port": conn.Laddr.Port,
+					"service":    serviceName(conn.Laddr.Port),
+					"timestamp":  time.Now().UTC().Format(time.RFC3339),
+					"success":    true,
+				})
 			}
 		}
 	}
@@ -208,15 +217,23 @@ func collectStatus() (gin.H, error) {
 		lanDevices = []LANDevice{}
 	}
 
-	// Real log-style lines for the Live Feed, derived from current metrics.
+	// Live Feed: who's connected — app logins and SSH sessions.
 	nowLog := time.Now().UTC().Format("15:04:05")
-	logs := []string{
-		fmt.Sprintf("[INFO] %s cpu %.0f%% · %d cores", nowLog, overallCPU, len(perCorePercentage)),
-		fmt.Sprintf("[INFO] %s mem %.1f/%.1f GB", nowLog, ramUsedGB, ramTotalGB),
-		fmt.Sprintf("[INFO] %s net %d established · %d listening", nowLog, activeConnCount, len(listeningPorts)),
+	logs := []string{}
+	if SessionsProvider != nil {
+		for _, s := range SessionsProvider() {
+			when := s.When
+			if when == "" {
+				when = nowLog
+			}
+			logs = append(logs, fmt.Sprintf("[APP] %s %s (%s) signed in", when, s.Name, s.Role))
+		}
 	}
-	if overallCPU > 90 {
-		logs = append(logs, fmt.Sprintf("[WARN] %s cpu pressure high (%.0f%%)", nowLog, overallCPU))
+	for _, ip := range sshSessions {
+		logs = append(logs, fmt.Sprintf("[SSH] %s session from %s", nowLog, ip))
+	}
+	if len(logs) == 0 {
+		logs = append(logs, fmt.Sprintf("[INFO] %s no active app or SSH sessions", nowLog))
 	}
 
 	// Health score

@@ -41,6 +41,17 @@ type LANDevice struct {
 // caller falls back to ARP.
 var RouterProvider func() ([]LANDevice, error)
 
+// AppSession is a currently signed-in app user (active JWT).
+type AppSession struct {
+	Name string
+	Role string
+	When string // last-login time "HH:MM:SS", empty if unknown
+}
+
+// SessionsProvider, when set at startup, lists users with an active session.
+// Backed by the DB in main.go so this package stays DB-free.
+var SessionsProvider func() []AppSession
+
 // Reading WiFi/ARP shells out and can take ~1s, so cache it; the status
 // ticker fires every 3s but this refreshes at most every netCacheTTL.
 var (

@@ -16,6 +16,7 @@ import (
 	"jarvishomeassist-brain/internal/handlers"
 	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/middleware"
+	"jarvishomeassist-brain/internal/models"
 	"jarvishomeassist-brain/internal/router"
 	"jarvishomeassist-brain/internal/sse"
 	"jarvishomeassist-brain/internal/workers"
@@ -97,6 +98,28 @@ func main() {
 			return out, nil
 		}
 		appLogger.Info("router", "Sagemcom router client enabled ("+cfg.RouterURL+")")
+	}
+
+	// Live Feed: list app users with an active session (non-revoked JWT).
+	handlers.SessionsProvider = func() []handlers.AppSession {
+		var users []models.User
+		if err := db.Where("jwt_token <> ''").Find(&users).Error; err != nil {
+			return nil
+		}
+		out := make([]handlers.AppSession, 0, len(users))
+		for _, u := range users {
+			if u.Role == models.RoleAssistant {
+				continue
+			}
+			when := ""
+			if u.LastLoginAt != nil {
+				when = u.LastLoginAt.UTC().Format("15:04:05")
+			}
+			out = append(out, handlers.AppSession{
+				Name: u.DisplayName, Role: string(u.Role), When: when,
+			})
+		}
+		return out
 	}
 
 	// Initialize the Gin router
