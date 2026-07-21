@@ -438,6 +438,23 @@ func TestBillHandler_DownloadPDF(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "application/pdf", w.Header().Get("Content-Type"))
 	require.Equal(t, "%PDF-1.4 test pdf content", w.Body.String())
+	// Inline by default, with a meaningful filename from the statement period
+	require.Equal(t, `inline; filename="utility-bill-2026-04.pdf"`, w.Header().Get("Content-Disposition"))
+	require.Equal(t, strconv.Itoa(len("%PDF-1.4 test pdf content")), w.Header().Get("Content-Length"))
+}
+
+func TestBillHandler_DownloadPDF_AttachmentMode(t *testing.T) {
+	r, db, _, _, _ := newBillRouter(t)
+	storeWithGet := &fakeStoreGet{data: []byte("%PDF-1.4 test pdf content")}
+	h := &handlers.BillHandler{DB: db, Store: storeWithGet}
+	r.GET("/utility-bills/:id/pdf", h.DownloadPDF)
+
+	bill := seedBillWithChildren(t, db, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/utility-bills/"+strconv.Itoa(int(bill.ID))+"/pdf?download=1", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, `attachment; filename="utility-bill-2026-04.pdf"`, w.Header().Get("Content-Disposition"))
 }
 
 func TestBillHandler_DownloadPDF_ManualEntry_404(t *testing.T) {

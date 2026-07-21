@@ -14,6 +14,23 @@ type Extractor struct {
 	ExtractText func(data []byte) (string, error)
 	Rasterize   func(data []byte) ([][]byte, error)
 	Vision      VisionExtractor
+	// OnProgress, when set, receives human-readable stage notes as the
+	// pipeline advances (surfaced to the UI via SSE).
+	OnProgress func(note string)
+}
+
+func (e *Extractor) progress(note string) {
+	if e.OnProgress != nil {
+		e.OnProgress(note)
+	}
+}
+
+// WithProgress returns a shallow copy of the extractor with OnProgress set,
+// so a shared extractor can emit per-job progress without data races.
+func (e *Extractor) WithProgress(fn func(note string)) *Extractor {
+	cp := *e
+	cp.OnProgress = fn
+	return &cp
 }
 
 // ExtractResult mirrors the columns the orchestrator will write back to
@@ -34,6 +51,7 @@ func (e *Extractor) Extract(ctx context.Context, data []byte) (ExtractResult, er
 		return ExtractResult{Status: "failed", Error: err.Error()}, nil
 	}
 
+	e.progress("Reading document text…")
 	text, err := e.ExtractText(data)
 	if err != nil {
 		return e.visionPath(ctx, data)
@@ -52,6 +70,7 @@ func (e *Extractor) Extract(ctx context.Context, data []byte) (ExtractResult, er
 }
 
 func (e *Extractor) visionPath(ctx context.Context, data []byte) (ExtractResult, error) {
+	e.progress("Converting pages to images…")
 	pages, err := e.Rasterize(data)
 	if err != nil {
 		return ExtractResult{Status: "needs_review", Error: "rasterize: " + err.Error()}, nil
@@ -59,6 +78,7 @@ func (e *Extractor) visionPath(ctx context.Context, data []byte) (ExtractResult,
 	if e.Vision == nil {
 		return ExtractResult{Status: "needs_review", Error: "no vision client"}, nil
 	}
+	e.progress("Analyzing with vision AI…")
 	parsed, aiConf, model, err := e.Vision.Extract(ctx, pages)
 	if err != nil {
 		return ExtractResult{Status: "needs_review", Error: "vision: " + err.Error(), Model: model}, nil

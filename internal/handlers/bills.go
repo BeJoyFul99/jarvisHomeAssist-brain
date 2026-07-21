@@ -457,6 +457,18 @@ func (h *BillHandler) DownloadPDF(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read pdf"})
 		return
 	}
+
+	// Meaningful filename: statement period when known, bill id otherwise.
+	filename := fmt.Sprintf("utility-bill-%d.pdf", bill.ID)
+	if !bill.StatementDate.IsZero() {
+		filename = "utility-bill-" + bill.StatementDate.Format("2006-01") + ".pdf"
+	}
+	disposition := "inline"
+	if c.Query("download") == "1" {
+		disposition = "attachment"
+	}
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename=%q`, disposition, filename))
+	c.Header("Content-Length", strconv.Itoa(len(data)))
 	c.Data(http.StatusOK, "application/pdf", data)
 }
 

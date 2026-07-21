@@ -17,4 +17,5 @@ type BillExtractionEvent struct {
 	Confidence  int    `json:"confidence,omitempty"`
 	Error       string `json:"error,omitempty"`
 	NeedsReview bool   `json:"needs_review,omitempty"`
+	Note        string `json:"note,omitempty"`
 }

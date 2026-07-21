@@ -67,7 +67,20 @@ func runOne(
 		markFailed(db, hub, &bill, fmt.Sprintf("store.Get: %v", err))
 		return
 	}
-	res, err := extractor.Extract(ctx, data)
+
+	// Surface pipeline stage notes to the UI when the extractor supports it.
+	runner := extractor
+	if pc, ok := extractor.(interface {
+		WithProgress(func(string)) *bills.Extractor
+	}); ok {
+		runner = pc.WithProgress(func(note string) {
+			hub.Broadcast(sse.Event{
+				Type: sse.EventBillExtractionProgress,
+				Data: sse.BillExtractionEvent{BillID: bill.ID, Note: note},
+			})
+		})
+	}
+	res, err := runner.Extract(ctx, data)
 	if err != nil {
 		markFailed(db, hub, &bill, err.Error())
 		return
