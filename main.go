@@ -171,14 +171,14 @@ func main() {
 	admin.GET("/permissions/schema", adminUsers.PermissionsSchema)
 	admin.GET("/audit-logs", adminUsers.AuditLogs)
 
-	// ── WiFi management ─────────────────────────────────────
+	// ── WiFi management (resource-perm enforced; admins bypass) ─────
 	wifi := &handlers.WifiHandler{DB: db, Hub: eventHub}
-	protected.GET("/wifi", wifi.List)                           // all users can list
-	protected.GET("/wifi/:id/credentials", wifi.GetCredentials) // for QR codes
-	admin.POST("/wifi", wifi.Create)
-	admin.PATCH("/wifi/:id", wifi.Update)
-	admin.POST("/wifi/:id/toggle", wifi.Toggle)
-	admin.DELETE("/wifi/:id", wifi.Delete)
+	protected.GET("/wifi", middleware.RequireResourcePerm(db, "network:view"), wifi.List)
+	protected.GET("/wifi/:id/credentials", middleware.RequireResourcePerm(db, "network:manage"), wifi.GetCredentials)
+	admin.POST("/wifi", middleware.RequireResourcePerm(db, "network:manage"), wifi.Create)
+	admin.PATCH("/wifi/:id", middleware.RequireResourcePerm(db, "network:manage"), wifi.Update)
+	admin.POST("/wifi/:id/toggle", middleware.RequireResourcePerm(db, "network:manage"), wifi.Toggle)
+	admin.DELETE("/wifi/:id", middleware.RequireResourcePerm(db, "network:manage"), wifi.Delete)
 
 	// ── Smart device management ─────────────────────────────
 	devices := &handlers.DeviceHandler{DB: db, Hub: eventHub, Log: appLogger}
