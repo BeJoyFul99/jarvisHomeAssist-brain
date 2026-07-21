@@ -29,6 +29,12 @@ type Config struct {
 	RouterUser     string // default "admin" for Bell
 	RouterPassword string // gateway admin password (secret)
 	RouterAuth     string // "sha512" (Giga Hub) or "md5" (Home Hub 2000/3000)
+	// Device blocking is firmware-specific; supply the exact xpath template
+	// (with {mac} and/or {uid} placeholders) and the on/off values. Empty
+	// xpath = blocking disabled (nothing is ever written).
+	RouterBlockXpath string
+	RouterBlockOn    string
+	RouterBlockOff   string
 }
 
 // Load reads configuration from environment variables.
@@ -75,6 +81,9 @@ func Load() (*Config, error) {
 		RouterUser:       envOrDefault("ROUTER_USER", "admin"),
 		RouterPassword:   os.Getenv("ROUTER_PASSWORD"),
 		RouterAuth:       envOrDefault("ROUTER_AUTH", "sha512"),
+		RouterBlockXpath: os.Getenv("ROUTER_BLOCK_XPATH"),
+		RouterBlockOn:    envOrDefault("ROUTER_BLOCK_ON", "true"),
+		RouterBlockOff:   envOrDefault("ROUTER_BLOCK_OFF", "false"),
 	}, nil
 }
 

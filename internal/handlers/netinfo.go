@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"bytes"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // wifiInfo is a best-effort read of the host's WiFi signal. OK is false when
@@ -51,6 +54,33 @@ type AppSession struct {
 // SessionsProvider, when set at startup, lists users with an active session.
 // Backed by the DB in main.go so this package stays DB-free.
 var SessionsProvider func() []AppSession
+
+// BlockProvider, when set, blocks/unblocks a device by MAC at the router.
+// Returns an error (surfaced to the admin) when unavailable or unconfigured.
+var BlockProvider func(mac string, block bool) error
+
+// BlockDevice handles POST /api/v1/admin/network/block {mac, block}.
+func BlockDevice(c *gin.Context) {
+	var body struct {
+		MAC   string `json:"mac" binding:"required"`
+		Block bool   `json:"block"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mac is required"})
+		return
+	}
+	if BlockProvider == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "router blocking is not configured (set ROUTER_PASSWORD and ROUTER_BLOCK_XPATH)",
+		})
+		return
+	}
+	if err := BlockProvider(body.MAC, body.Block); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
 
 // Reading WiFi/ARP shells out and can take ~1s, so cache it; the status
 // ticker fires every 3s but this refreshes at most every netCacheTTL.

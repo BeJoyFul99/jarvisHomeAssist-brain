@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -24,6 +25,7 @@ const apiEndpoint = "/cgi/json-req"
 
 // Host is a device connected to the gateway.
 type Host struct {
+	UID       int    `json:"uid"`
 	Name      string `json:"name"`
 	IP        string `json:"ip"`
 	MAC       string `json:"mac"`
@@ -242,6 +244,7 @@ func (c *Client) Hosts() ([]Host, error) {
 	}
 	var wrap struct {
 		Value []struct {
+			UID           int    `json:"Uid"`
 			PhysAddress   string `json:"PhysAddress"`
 			IPAddress     string `json:"IPAddress"`
 			HostName      string `json:"HostName"`
@@ -264,6 +267,7 @@ func (c *Client) Hosts() ([]Host, error) {
 			name = h.HostName
 		}
 		out = append(out, Host{
+			UID:       h.UID,
 			Name:      name,
 			IP:        h.IPAddress,
 			MAC:       strings.ToLower(h.PhysAddress),
@@ -272,6 +276,58 @@ func (c *Client) Hosts() ([]Host, error) {
 		})
 	}
 	return out, nil
+}
+
+// SetValue writes a single value at an xpath (mirrors the library setValue).
+// Used for device blocking; the exact xpath is firmware-specific and supplied
+// by config, so this never writes a hardcoded/guessed path.
+func (c *Client) SetValue(xpath, value string) error {
+	if err := c.login(); err != nil {
+		return err
+	}
+	defer c.logout()
+	actions := []map[string]any{{
+		"id":         0,
+		"method":     "setValue",
+		"xpath":      xpath,
+		"parameters": map[string]any{"value": value},
+		"options":    map[string]any{},
+	}}
+	_, err := c.request(actions, false)
+	return err
+}
+
+// BlockDevice blocks/unblocks a device by MAC using a configured xpath
+// template. The template may contain {mac} and/or {uid} placeholders; {uid}
+// triggers a host lookup to resolve the router's internal id. Returns a clear
+// error when blocking isn't configured — nothing is written in that case.
+func (c *Client) BlockDevice(mac string, block bool, xpathTmpl, onVal, offVal string) error {
+	if strings.TrimSpace(xpathTmpl) == "" {
+		return errors.New("router blocking not configured (set ROUTER_BLOCK_XPATH)")
+	}
+	xpath := strings.ReplaceAll(xpathTmpl, "{mac}", mac)
+	if strings.Contains(xpath, "{uid}") {
+		hosts, err := c.Hosts()
+		if err != nil {
+			return err
+		}
+		uid := ""
+		for _, h := range hosts {
+			if strings.EqualFold(h.MAC, mac) {
+				uid = fmt.Sprintf("%d", h.UID)
+				break
+			}
+		}
+		if uid == "" {
+			return fmt.Errorf("device %s not found on router", mac)
+		}
+		xpath = strings.ReplaceAll(xpath, "{uid}", uid)
+	}
+	val := offVal
+	if block {
+		val = onVal
+	}
+	return c.SetValue(xpath, val)
 }
 
 func (c *Client) logout() {

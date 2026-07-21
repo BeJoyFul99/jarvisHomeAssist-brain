@@ -97,6 +97,9 @@ func main() {
 			}
 			return out, nil
 		}
+		handlers.BlockProvider = func(mac string, block bool) error {
+			return rc.BlockDevice(mac, block, cfg.RouterBlockXpath, cfg.RouterBlockOn, cfg.RouterBlockOff)
+		}
 		appLogger.Info("router", "Sagemcom router client enabled ("+cfg.RouterURL+")")
 	}
 
@@ -175,6 +178,8 @@ func main() {
 	wifi := &handlers.WifiHandler{DB: db, Hub: eventHub}
 	protected.GET("/wifi", middleware.RequireResourcePerm(db, "network:view"), wifi.List)
 	protected.GET("/wifi/:id/credentials", middleware.RequireResourcePerm(db, "network:manage"), wifi.GetCredentials)
+	// Block/unblock a device on the home network (router write) — network:manage.
+	admin.POST("/network/block", middleware.RequireResourcePerm(db, "network:manage"), handlers.BlockDevice)
 	admin.POST("/wifi", middleware.RequireResourcePerm(db, "network:manage"), wifi.Create)
 	admin.PATCH("/wifi/:id", middleware.RequireResourcePerm(db, "network:manage"), wifi.Update)
 	admin.POST("/wifi/:id/toggle", middleware.RequireResourcePerm(db, "network:manage"), wifi.Toggle)
