@@ -70,6 +70,7 @@ func main() {
 	handlers.SeedDefaultDevices(db, appLogger)
 	handlers.SeedDefaultSettings(db)
 	handlers.SeedDefaultChatRooms(db, appLogger)
+	handlers.BackfillEmptyResourcePerms(db, appLogger)
 
 	// Initialize the Gin router
 	r := gin.Default()
@@ -131,15 +132,21 @@ func main() {
 
 	// ── Smart device management ─────────────────────────────
 	devices := &handlers.DeviceHandler{DB: db, Hub: eventHub, Log: appLogger}
-	protected.GET("/devices", devices.List)                 // all users can list
-	protected.GET("/devices/:id", devices.Get)              // single device
-	protected.GET("/devices/:id/state", devices.State)      // poll live state from bulb
-	protected.POST("/devices/:id/control", devices.Control) // send command (on/off/brightness/etc.)
-	protected.GET("/devices/scenes", devices.Scenes)        // available WiZ scenes
-	admin.POST("/devices", devices.Create)
-	admin.PATCH("/devices/:id", devices.Update)
-	admin.DELETE("/devices/:id", devices.Delete)
-	admin.POST("/devices/discover", devices.Discover) // scan network for WiZ bulbs
+	// View endpoints — require smart_device:view (administrators bypass)
+	protected.GET("/devices", middleware.RequireResourcePerm(db, "smart_device:view"), devices.List)
+	protected.GET("/devices/:id", middleware.RequireResourcePerm(db, "smart_device:view"), devices.Get)
+	protected.GET("/devices/:id/state", middleware.RequireResourcePerm(db, "smart_device:view"), devices.State)
+	// Control endpoint — require smart_device:control
+	protected.POST("/devices/:id/control", middleware.RequireResourcePerm(db, "smart_device:control"), devices.Control)
+	// Scene catalogue is a static list — any authenticated user may read it
+	protected.GET("/devices/scenes", devices.Scenes)
+	// Device CRUD + discovery — administrator only
+	deviceAdmin := admin.Group("/devices")
+	deviceAdmin.Use(middleware.RequireRole("administrator"))
+	deviceAdmin.POST("", devices.Create)
+	deviceAdmin.PATCH("/:id", devices.Update)
+	deviceAdmin.DELETE("/:id", devices.Delete)
+	deviceAdmin.POST("/discover", devices.Discover)
 
 	// ── User preferences (per-user, any authenticated user) ─
 	prefs := &handlers.PreferencesHandler{DB: db}

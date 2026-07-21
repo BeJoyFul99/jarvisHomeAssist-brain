@@ -49,11 +49,25 @@ type loginResponse struct {
 }
 
 type userResponse struct {
-	ID          uint       `json:"id"`
-	Email       string     `json:"email"`
-	DisplayName string     `json:"display_name"`
-	Role        string     `json:"role"`
-	LastLoginAt *time.Time `json:"last_login_at"`
+	ID            uint       `json:"id"`
+	Email         string     `json:"email"`
+	DisplayName   string     `json:"display_name"`
+	Role          string     `json:"role"`
+	ResourcePerms []string   `json:"resource_perms"`
+	PermExpiresAt *time.Time `json:"perm_expires_at"`
+	LastLoginAt   *time.Time `json:"last_login_at"`
+}
+
+func newUserResponse(u *models.User) userResponse {
+	return userResponse{
+		ID:            u.ID,
+		Email:         u.Email,
+		DisplayName:   u.DisplayName,
+		Role:          string(u.Role),
+		ResourcePerms: u.GetResourcePerms(),
+		PermExpiresAt: u.PermExpiresAt,
+		LastLoginAt:   u.LastLoginAt,
+	}
 }
 
 // issueJWT builds, signs, and persists a short-lived JWT access token.
@@ -209,13 +223,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, loginResponse{
 		Token:        signed,
 		RefreshToken: refreshToken,
-		User: userResponse{
-			ID:          user.ID,
-			Email:       user.Email,
-			DisplayName: user.DisplayName,
-			Role:        string(user.Role),
-			LastLoginAt: user.LastLoginAt,
-		},
+		User:         newUserResponse(&user),
 	})
 }
 
@@ -325,13 +333,7 @@ func (h *AuthHandler) PINLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, loginResponse{
 		Token:        signed,
 		RefreshToken: refreshToken,
-		User: userResponse{
-			ID:          user.ID,
-			Email:       user.Email,
-			DisplayName: user.DisplayName,
-			Role:        string(user.Role),
-			LastLoginAt: user.LastLoginAt,
-		},
+		User:         newUserResponse(&user),
 	})
 }
 
@@ -461,13 +463,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	c.JSON(http.StatusOK, loginResponse{
 		Token:        signed,
 		RefreshToken: newRefresh,
-		User: userResponse{
-			ID:          user.ID,
-			Email:       user.Email,
-			DisplayName: user.DisplayName,
-			Role:        string(user.Role),
-			LastLoginAt: user.LastLoginAt,
-		},
+		User:         newUserResponse(&user),
 	})
 }
 

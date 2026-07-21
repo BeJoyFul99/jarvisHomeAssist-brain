@@ -91,6 +91,7 @@ func JWTAuth(secret string, db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		c.Set("user_id", user.ID)
 		c.Set("user_email", claims["email"])
 		c.Set("user_role", claims["role"])
 		c.Set("user_name", claims["name"])
