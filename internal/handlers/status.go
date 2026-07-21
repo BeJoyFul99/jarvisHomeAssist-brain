@@ -48,6 +48,36 @@ func (h *StatusHandler) StartStatusTicker() {
 	}()
 }
 
+// serviceName maps a well-known TCP port to a human label for the UI.
+func serviceName(port uint32) string {
+	switch port {
+	case 22:
+		return "SSH"
+	case 80:
+		return "HTTP"
+	case 443:
+		return "HTTPS"
+	case 3000:
+		return "Dev Server"
+	case 5000:
+		return "Jarvis API"
+	case 5173:
+		return "Vite"
+	case 5432:
+		return "PostgreSQL"
+	case 6379:
+		return "Redis"
+	case 8080:
+		return "HTTP Alt"
+	case 3306:
+		return "MySQL"
+	case 27017:
+		return "MongoDB"
+	default:
+		return "TCP"
+	}
+}
+
 // getLocalIP returns the non-loopback local IP of the host.
 func getLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
@@ -119,22 +149,60 @@ func collectStatus() (gin.H, error) {
 		diskFreeGB = float64(d.Free) / (1024 * 1024 * 1024)
 	}
 
-	// 4. Network connections
+	// 4. Network connections — real listening ports (Port Sentry) and real
+	//    inbound established connections (who is connected to this server).
 	connections, err := psnet.Connections("tcp")
+	listeningSet := map[uint32]bool{}
 	listeningPorts := []gin.H{}
+	inboundConns := []gin.H{}
 	activeConnCount := 0
 	if err == nil {
+		// First pass: collect the set of ports we listen on (dedup IPv4/IPv6).
+		seenPort := map[uint32]bool{}
 		for _, conn := range connections {
 			if conn.Status == "LISTEN" {
-				listeningPorts = append(listeningPorts, gin.H{
-					"port":   conn.Laddr.Port,
-					"ip":     conn.Laddr.IP,
-					"family": conn.Family,
-				})
-			} else if conn.Status == "ESTABLISHED" {
-				activeConnCount++
+				listeningSet[conn.Laddr.Port] = true
+				if !seenPort[conn.Laddr.Port] {
+					seenPort[conn.Laddr.Port] = true
+					listeningPorts = append(listeningPorts, gin.H{
+						"port":    conn.Laddr.Port,
+						"service": serviceName(conn.Laddr.Port),
+						"open":    true,
+					})
+				}
 			}
 		}
+		// Second pass: established connections TO one of our listening ports
+		// are inbound — someone connected to the server.
+		for _, conn := range connections {
+			if conn.Status != "ESTABLISHED" {
+				continue
+			}
+			activeConnCount++
+			if listeningSet[conn.Laddr.Port] && conn.Raddr.IP != "" {
+				if len(inboundConns) < 20 {
+					inboundConns = append(inboundConns, gin.H{
+						"ip":         conn.Raddr.IP,
+						"remote":     fmt.Sprintf("%s:%d", conn.Raddr.IP, conn.Raddr.Port),
+						"local_port": conn.Laddr.Port,
+						"service":    serviceName(conn.Laddr.Port),
+						"timestamp":  time.Now().UTC().Format(time.RFC3339),
+						"success":    true,
+					})
+				}
+			}
+		}
+	}
+
+	// Real log-style lines for the Live Feed, derived from current metrics.
+	nowLog := time.Now().UTC().Format("15:04:05")
+	logs := []string{
+		fmt.Sprintf("[INFO] %s cpu %.0f%% · %d cores", nowLog, overallCPU, len(perCorePercentage)),
+		fmt.Sprintf("[INFO] %s mem %.1f/%.1f GB", nowLog, ramUsedGB, ramTotalGB),
+		fmt.Sprintf("[INFO] %s net %d established · %d listening", nowLog, activeConnCount, len(listeningPorts)),
+	}
+	if overallCPU > 90 {
+		logs = append(logs, fmt.Sprintf("[WARN] %s cpu pressure high (%.0f%%)", nowLog, overallCPU))
 	}
 
 	// Health score
@@ -172,7 +240,9 @@ func collectStatus() (gin.H, error) {
 			"vpn_active":         "Tailscale",
 			"active_connections": activeConnCount,
 			"port_sentry":        listeningPorts,
+			"connections":        inboundConns,
 		},
+		"logs": logs,
 		"hardware": gin.H{
 			"cpu_usage": cpuUsage,
 			"temperatures": gin.H{
@@ -201,33 +271,17 @@ func collectStatus() (gin.H, error) {
 			"ai_instances":     1,
 		},
 		"ai_engine": gin.H{
-			"status":          "Inferring",
-			"active_model":    "Mistral-7B-v0.3-Q4_K_M.gguf",
+			// Inference runs on Cloudflare Workers AI (see the AI Usage page and
+			// the Model Library for the active per-feature models). This node does
+			// not host a local model, so we report the real backend as remote.
+			"status":          "Ready",
+			"active_model":    "Cloudflare Workers AI",
 			"tokens_per_sec":  0.0,
 			"context_used":    0,
 			"context_total":   8192,
-			"compute_backend": "CPU",
-			"terminal_latest": ">_ llama.cpp prompt",
-			"available_models": []gin.H{
-				{
-					"name":         "Mistral-7B-v0.3-Q4_K_M.gguf",
-					"size_gb":      4.1,
-					"quantization": "Q4_K_M",
-					"is_active":    true,
-				},
-				{
-					"name":         "Llama-3-8B-Q3_K_S.gguf",
-					"size_gb":      3.1,
-					"quantization": "Q3_K_S",
-					"is_active":    false,
-				},
-				{
-					"name":         "Phi-3-mini-Q5_K_M.gguf",
-					"size_gb":      1.1,
-					"quantization": "Q5_K_M",
-					"is_active":    false,
-				},
-			},
+			"compute_backend": "Cloudflare",
+			"terminal_latest": ">_ workers-ai",
+			"available_models": []gin.H{},
 		},
 	}, nil
 }
