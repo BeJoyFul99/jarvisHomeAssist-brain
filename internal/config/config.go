@@ -23,6 +23,12 @@ type Config struct {
 	VAPIDPublicKey    string // VAPID public key for Web Push (optional)
 	VAPIDPrivateKey   string // VAPID private key for Web Push (optional)
 	VAPIDContact      string // VAPID contact email (e.g. mailto:admin@example.com)
+	// Home router (Sagemcom F@st / Bell Giga Hub) for the real connected-device
+	// list. Password empty = disabled (falls back to ARP neighbor discovery).
+	RouterURL      string // e.g. http://192.168.2.1
+	RouterUser     string // default "admin" for Bell
+	RouterPassword string // gateway admin password (secret)
+	RouterAuth     string // "sha512" (Giga Hub) or "md5" (Home Hub 2000/3000)
 }
 
 // Load reads configuration from environment variables.
@@ -65,6 +71,10 @@ func Load() (*Config, error) {
 		VAPIDPublicKey:   os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey:  os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDContact:     envOrDefault("VAPID_CONTACT", "mailto:admin@homelab.local"),
+		RouterURL:        envOrDefault("ROUTER_URL", "http://192.168.2.1"),
+		RouterUser:       envOrDefault("ROUTER_USER", "admin"),
+		RouterPassword:   os.Getenv("ROUTER_PASSWORD"),
+		RouterAuth:       envOrDefault("ROUTER_AUTH", "sha512"),
 	}, nil
 }
 

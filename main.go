@@ -16,6 +16,7 @@ import (
 	"jarvishomeassist-brain/internal/handlers"
 	"jarvishomeassist-brain/internal/logger"
 	"jarvishomeassist-brain/internal/middleware"
+	"jarvishomeassist-brain/internal/router"
 	"jarvishomeassist-brain/internal/sse"
 	"jarvishomeassist-brain/internal/workers"
 	"jarvishomeassist-brain/internal/ws"
@@ -71,6 +72,32 @@ func main() {
 	handlers.SeedDefaultSettings(db)
 	handlers.SeedDefaultChatRooms(db, appLogger)
 	handlers.BackfillEmptyResourcePerms(db, appLogger)
+
+	// Wire the home-router client for the real connected-device list, if
+	// configured. Falls back to ARP neighbor discovery when unset.
+	if cfg.RouterPassword != "" {
+		rc := router.New(cfg.RouterURL, cfg.RouterUser, cfg.RouterPassword, cfg.RouterAuth)
+		handlers.RouterProvider = func() ([]handlers.LANDevice, error) {
+			hosts, err := rc.Hosts()
+			if err != nil {
+				appLogger.Error("router", "device list: "+err.Error())
+				return nil, err
+			}
+			out := make([]handlers.LANDevice, 0, len(hosts))
+			for _, h := range hosts {
+				iface := "wired"
+				if h.Interface == "802.11" || h.Interface == "WiFi" {
+					iface = "wifi"
+				}
+				out = append(out, handlers.LANDevice{
+					Name: h.Name, IP: h.IP, MAC: h.MAC,
+					Interface: iface, Active: h.Active, Source: "router",
+				})
+			}
+			return out, nil
+		}
+		appLogger.Info("router", "Sagemcom router client enabled ("+cfg.RouterURL+")")
+	}
 
 	// Initialize the Gin router
 	r := gin.Default()

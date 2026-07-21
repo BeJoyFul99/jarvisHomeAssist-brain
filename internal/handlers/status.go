@@ -194,6 +194,20 @@ func collectStatus() (gin.H, error) {
 		}
 	}
 
+	// 5. Real WiFi signal + LAN neighbors (cached, best-effort per platform).
+	wifi, lanDevices := cachedNetInfo()
+	signalDBM := 0
+	signalQualityLabel := "Unavailable"
+	ssid := ""
+	if wifi.OK {
+		signalDBM = wifi.SignalDBM
+		signalQualityLabel = wifi.Quality
+		ssid = wifi.SSID
+	}
+	if lanDevices == nil {
+		lanDevices = []LANDevice{}
+	}
+
 	// Real log-style lines for the Live Feed, derived from current metrics.
 	nowLog := time.Now().UTC().Format("15:04:05")
 	logs := []string{
@@ -235,12 +249,14 @@ func collectStatus() (gin.H, error) {
 			"health_score": finalHealthScore,
 		},
 		"network": gin.H{
-			"signal_dbm":         -38,
-			"signal_quality":     "Ultra Stable",
-			"vpn_active":         "Tailscale",
+			"signal_dbm":         signalDBM,
+			"signal_quality":     signalQualityLabel,
+			"wifi_available":     wifi.OK,
+			"ssid":               ssid,
 			"active_connections": activeConnCount,
 			"port_sentry":        listeningPorts,
 			"connections":        inboundConns,
+			"lan_devices":        lanDevices,
 		},
 		"logs": logs,
 		"hardware": gin.H{
