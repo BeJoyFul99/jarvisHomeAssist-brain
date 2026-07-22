@@ -277,6 +277,18 @@ func main() {
 	admin.GET("/ai-usage/config", aiUsage.Config)
 	admin.GET("/ai-models", aiUsage.Models)
 
+	// ── Tools: Resume Builder (owner-scoped; guests excluded) ─
+	resumeHandler := &handlers.ResumeHandler{DB: db, Cfg: cfg, Log: appLogger}
+	resumeGroup := protected.Group("/resume")
+	resumeGroup.Use(middleware.RequireRole("administrator", "family_member"))
+	resumeGroup.GET("/profile", resumeHandler.GetProfile)
+	resumeGroup.PUT("/profile", resumeHandler.UpdateProfile)
+	resumeGroup.POST("/generate", resumeHandler.Generate)
+	resumeGroup.GET("/generated", resumeHandler.ListGenerated)
+	resumeGroup.GET("/generated/:id", resumeHandler.GetGenerated)
+	resumeGroup.DELETE("/generated/:id", resumeHandler.DeleteGenerated)
+	resumeGroup.GET("/models", aiUsage.Models)
+
 	// ── Chat (real-time messaging + AI) ─────────────────────
 	wsHub := ws.NewHub(appLogger)
 	// Create notifHandler early so we can wire chat → notification delivery

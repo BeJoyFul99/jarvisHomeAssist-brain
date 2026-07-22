@@ -71,8 +71,9 @@ func SeedDefaultSettings(db *gorm.DB) {
 		"cpu_alert_threshold": "90",
 		"auto_sleep_ai":       "true",
 		// Per-feature AI model selection (validated against the worker catalog)
-		"ai_chat_model": "@cf/meta/llama-3.2-11b-vision-instruct",
-		"ai_bill_model": "@cf/google/gemma-3-12b-it",
+		"ai_chat_model":   "@cf/meta/llama-3.2-11b-vision-instruct",
+		"ai_bill_model":   "@cf/google/gemma-3-12b-it",
+		"ai_resume_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 	}
 	for k, v := range defaults {
 		var existing models.Setting
