@@ -90,42 +90,62 @@ func runOne(
 		return
 	}
 
+	// A soft failure (e.g. rasterize/vision error) comes back as a non-failed
+	// status but with res.Error set and an empty ParsedBill. Applying that would
+	// zero the total and DELETE the bill's existing line items and meters — a
+	// destructive re-extract. Only apply parsed values when the pipeline produced
+	// a real result; otherwise preserve prior data and record the error.
+	applyParsed := res.Error == ""
+
 	err = db.Transaction(func(tx *gorm.DB) error {
 		bill.ExtractionStatus = res.Status
 		bill.ExtractionMethod = &res.Method
 		bill.ExtractionConfidence = &res.Confidence
-		bill.ExtractionError = nil
+		if res.Error != "" {
+			msg := res.Error
+			bill.ExtractionError = &msg
+		} else {
+			bill.ExtractionError = nil
+		}
 		if res.Model != "" {
 			m := res.Model
 			bill.ExtractionModel = &m
 		} else {
 			bill.ExtractionModel = nil
 		}
-		if !res.Parsed.StatementDate.IsZero() {
-			bill.StatementDate = res.Parsed.StatementDate
-		}
-		if !res.Parsed.DueDate.IsZero() {
-			bill.DueDate = res.Parsed.DueDate
-		}
-		if !res.Parsed.BillingPeriodStart.IsZero() {
-			bill.BillingPeriodStart = res.Parsed.BillingPeriodStart
-		}
-		if !res.Parsed.BillingPeriodEnd.IsZero() {
-			bill.BillingPeriodEnd = res.Parsed.BillingPeriodEnd
-		}
-		if res.Parsed.BillType != "" {
-			bill.BillType = res.Parsed.BillType
-		}
-		bill.TotalAmount = res.Parsed.TotalAmount
-		bill.PreviousBalance = res.Parsed.PreviousBalance
-		bill.PaymentsReceived = res.Parsed.PaymentsReceived
-		bill.BalanceForward = res.Parsed.BalanceForward
-		bill.LateFees = res.Parsed.LateFees
-		if res.Parsed.Currency != "" {
-			bill.Currency = res.Parsed.Currency
+
+		if applyParsed {
+			if !res.Parsed.StatementDate.IsZero() {
+				bill.StatementDate = res.Parsed.StatementDate
+			}
+			if !res.Parsed.DueDate.IsZero() {
+				bill.DueDate = res.Parsed.DueDate
+			}
+			if !res.Parsed.BillingPeriodStart.IsZero() {
+				bill.BillingPeriodStart = res.Parsed.BillingPeriodStart
+			}
+			if !res.Parsed.BillingPeriodEnd.IsZero() {
+				bill.BillingPeriodEnd = res.Parsed.BillingPeriodEnd
+			}
+			if res.Parsed.BillType != "" {
+				bill.BillType = res.Parsed.BillType
+			}
+			bill.TotalAmount = res.Parsed.TotalAmount
+			bill.PreviousBalance = res.Parsed.PreviousBalance
+			bill.PaymentsReceived = res.Parsed.PaymentsReceived
+			bill.BalanceForward = res.Parsed.BalanceForward
+			bill.LateFees = res.Parsed.LateFees
+			if res.Parsed.Currency != "" {
+				bill.Currency = res.Parsed.Currency
+			}
 		}
 		if err := tx.Save(&bill).Error; err != nil {
 			return err
+		}
+
+		// Never touch existing line items / meters on a soft failure.
+		if !applyParsed {
+			return nil
 		}
 		if err := tx.Where("bill_id = ?", bill.ID).Delete(&models.UtilityBillLineItem{}).Error; err != nil {
 			return err
