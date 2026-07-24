@@ -60,10 +60,18 @@ func (e *Extractor) Extract(ctx context.Context, data []byte) (ExtractResult, er
 	parsed, _ := ParsePowerStream(text)
 	score := ScoreConfidence(parsed)
 
-	if score >= 70 {
+	// A structured parse can clear the score threshold while still missing the
+	// fields users care about most: ScoreConfidence credits partial completeness,
+	// so a bill with account+total+meters but NO line items and NO statement date
+	// scores ~57. Persisting that leaves the UI with "—" dates and an empty
+	// breakdown. Treat such a parse as unusable and fall through to vision, which
+	// reads the charge tables and dates reliably.
+	usable := len(parsed.LineItems) > 0 && !parsed.StatementDate.IsZero()
+
+	if score >= 70 && usable {
 		return ExtractResult{Parsed: parsed, Status: "completed", Method: "structured", Confidence: score}, nil
 	}
-	if score >= 50 {
+	if score >= 50 && usable {
 		return ExtractResult{Parsed: parsed, Status: "needs_review", Method: "structured", Confidence: score}, nil
 	}
 	return e.visionPath(ctx, data)
