@@ -65,6 +65,14 @@ func (h *AIUsageHandler) queryAnalyticsEngine(query string) (*analyticsResponse,
 		return nil, fmt.Errorf("failed to parse response: %w, body: %s", err, string(body))
 	}
 
+	// Data is serialized straight back to the browser as `days`/`models`/
+	// `errors`. If the upstream API omits it or sends null it stays nil, which
+	// marshals to JSON `null` and breaks any client that maps over it. A query
+	// with no matching rows is an empty list.
+	if result.Data == nil {
+		result.Data = []map[string]interface{}{}
+	}
+
 	return &result, nil
 }
 
@@ -175,14 +183,14 @@ func (h *AIUsageHandler) Today(c *gin.Context) {
 	result, err := h.queryAnalyticsEngine(query)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"total_calls":    0,
-			"total_neurons":  0,
-			"total_cost":     0,
-			"avg_latency_ms": 0,
-			"error_count":    0,
-			"vision_calls":   0,
+			"total_calls":     0,
+			"total_neurons":   0,
+			"total_cost":      0,
+			"avg_latency_ms":  0,
+			"error_count":     0,
+			"vision_calls":    0,
 			"free_tier_limit": 10000,
-			"error":          err.Error(),
+			"error":           err.Error(),
 		})
 		return
 	}

@@ -13,7 +13,7 @@ type Announcement struct {
 	Author    User           `gorm:"foreignKey:AuthorID" json:"author,omitempty"`
 	Title     string         `gorm:"size:255;not null" json:"title"`
 	Body      string         `gorm:"type:text;not null" json:"body"`
-	Priority  string         `gorm:"size:32;not null;default:'normal'" json:"priority"` // low, normal, high, urgent
+	Priority  string         `gorm:"size:32;not null;default:'normal'" json:"priority"`  // low, normal, high, urgent
 	Category  string         `gorm:"size:64;not null;default:'general'" json:"category"` // general, maintenance, security, event
 	Pinned    bool           `gorm:"not null;default:false" json:"pinned"`
 	EditedAt  *time.Time     `json:"edited_at"`

@@ -123,9 +123,9 @@ type User struct {
 	PermExpiresAt *time.Time     `json:"perm_expires_at"`
 	Phone         string         `gorm:"size:50" json:"phone"`
 	IsLocked      bool           `gorm:"not null;default:false" json:"is_locked"`
-	JWTToken      string         `gorm:"size:512" json:"-"`          // bcrypt hash of current access token (empty = revoked)
+	JWTToken      string         `gorm:"size:512" json:"-"` // bcrypt hash of current access token (empty = revoked)
 	AccessCount   int64          `gorm:"not null;default:0" json:"access_count"`
-	RefreshToken  string         `gorm:"size:512" json:"-"`          // bcrypt hash of current refresh token (empty = revoked)
+	RefreshToken  string         `gorm:"size:512" json:"-"` // bcrypt hash of current refresh token (empty = revoked)
 	FCMToken      string         `gorm:"size:512" json:"-"`
 	LastLoginAt   *time.Time     `json:"last_login_at"`
 	// Password reset token and expiry used for password reset flows.
@@ -183,12 +183,20 @@ func (u *User) IsGuestExpired() bool {
 }
 
 // GetResourcePerms deserializes the JSON permission array.
+//
+// It never returns nil. This value is serialized straight into the login and
+// refresh responses as `resource_perms`, and a nil slice marshals to JSON
+// `null` rather than `[]` — which clients then crash on when they index or
+// read .length off it. An empty permission set is `[]`, not "absent".
 func (u *User) GetResourcePerms() []string {
-	var perms []string
 	if u.ResourcePerms == nil {
-		return perms
+		return []string{}
 	}
-	_ = json.Unmarshal(u.ResourcePerms, &perms)
+	var perms []string
+	// A stored literal `null`, or malformed JSON, both leave perms nil.
+	if err := json.Unmarshal(u.ResourcePerms, &perms); err != nil || perms == nil {
+		return []string{}
+	}
 	return perms
 }
 

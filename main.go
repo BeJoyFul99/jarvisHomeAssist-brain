@@ -203,6 +203,11 @@ func main() {
 	deviceAdmin.DELETE("/:id", devices.Delete)
 	deviceAdmin.POST("/discover", devices.Discover)
 
+	// ── Own profile (per-user, any authenticated user) ──────
+	me := &handlers.MeHandler{DB: db}
+	protected.GET("/me", me.Get)
+	protected.PATCH("/me", me.Update)
+
 	// ── User preferences (per-user, any authenticated user) ─
 	prefs := &handlers.PreferencesHandler{DB: db}
 	protected.GET("/preferences", prefs.Get)
@@ -288,6 +293,16 @@ func main() {
 	resumeGroup.GET("/generated/:id", resumeHandler.GetGenerated)
 	resumeGroup.DELETE("/generated/:id", resumeHandler.DeleteGenerated)
 	resumeGroup.GET("/models", aiUsage.Models)
+
+	// ── Tools: Debt Rescue Mode (owner-scoped; guests excluded) ─
+	debtHandler := &handlers.DebtHandler{DB: db, Cfg: cfg, Log: appLogger}
+	debtGroup := protected.Group("/debt")
+	debtGroup.Use(middleware.RequireRole("administrator", "family_member"))
+	debtGroup.GET("/profile", debtHandler.GetProfile)
+	debtGroup.PUT("/profile", debtHandler.UpdateProfile)
+	debtGroup.POST("/plan", debtHandler.Plan)
+	debtGroup.POST("/coach", debtHandler.Coach)
+	debtGroup.GET("/models", aiUsage.Models)
 
 	// ── Chat (real-time messaging + AI) ─────────────────────
 	wsHub := ws.NewHub(appLogger)

@@ -203,15 +203,18 @@ func readLANDevices() []LANDevice {
 	return readARPDevices()
 }
 
+// readARPDevices never returns nil — "no devices found" is an empty list, and
+// a nil slice would reach the status payload as JSON `null` instead of `[]`.
+// Windows always takes the first branch, so this is the common path here.
 func readARPDevices() []LANDevice {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return nil
+		return []LANDevice{}
 	}
 	out, err := exec.Command("arp", "-a").Output()
 	if err != nil {
-		return nil
+		return []LANDevice{}
 	}
-	var devs []LANDevice
+	devs := []LANDevice{}
 	seen := map[string]bool{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
